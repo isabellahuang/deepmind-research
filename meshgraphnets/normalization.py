@@ -23,7 +23,7 @@ import tensorflow.compat.v1 as tf
 class Normalizer(snt.AbstractModule):
   """Feature normalizer that accumulates statistics online."""
 
-  def __init__(self, size, max_accumulations=10**6, std_epsilon=1e-8,
+  def __init__(self, size, max_accumulations=10**10, std_epsilon=1e-8,
                name='Normalizer'):
     super(Normalizer, self).__init__(name=name)
     self._max_accumulations = max_accumulations
@@ -36,7 +36,7 @@ class Normalizer(snt.AbstractModule):
       self._acc_sum_squared = tf.Variable(tf.zeros(size, tf.float32),
                                           trainable=False)
 
-  def _build(self, batched_data, accumulate=True):
+  def _build(self, batched_data, accumulate=False): # Used to be True by default
     """Normalizes input data and accumulates statistics."""
     update_op = tf.no_op()
     if accumulate:

@@ -21,6 +21,8 @@ import pickle
 from absl import app
 from absl import flags
 
+import matplotlib
+matplotlib.use('TkAgg')
 from matplotlib import animation
 import matplotlib.pyplot as plt
 

@@ -118,4 +118,5 @@ class EncodeProcessDecode(snt.AbstractModule):
     latent_graph = self._encoder(graph)
     for _ in range(self._message_passing_steps):
       latent_graph = GraphNetBlock(model_fn)(latent_graph)
-    return self._decoder(latent_graph)
+    return self._decoder(latent_graph) # returns per-node output
+    # return "Hello"

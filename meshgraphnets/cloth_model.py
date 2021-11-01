@@ -32,9 +32,10 @@ class Model(snt.AbstractModule):
     with self._enter_variable_scope():
       self._learned_model = learned_model
       self._output_normalizer = normalization.Normalizer(
-          size=3, name='output_normalizer')
+          size=4, name='output_normalizer')
       self._node_normalizer = normalization.Normalizer(
           size=3+common.NodeType.SIZE, name='node_normalizer')
+
       self._edge_normalizer = normalization.Normalizer(
           size=7, name='edge_normalizer')  # 2D coord + 3D coord + 2*length = 7
 
@@ -44,6 +45,7 @@ class Model(snt.AbstractModule):
     velocity = inputs['world_pos'] - inputs['prev|world_pos']
     node_type = tf.one_hot(inputs['node_type'][:, 0], common.NodeType.SIZE)
     node_features = tf.concat([velocity, node_type], axis=-1)
+
 
     # construct graph edges
     senders, receivers = common.triangles_to_edges(inputs['cells'])
@@ -66,6 +68,7 @@ class Model(snt.AbstractModule):
         node_features=self._node_normalizer(node_features, is_training),
         edge_sets=[mesh_edges])
 
+  # Is this used?
   def _build(self, inputs):
     graph = self._build_graph(inputs, is_training=False)
     per_node_network_output = self._learned_model(graph)
@@ -82,6 +85,7 @@ class Model(snt.AbstractModule):
     prev_position = inputs['prev|world_pos']
     target_position = inputs['target|world_pos']
     target_acceleration = target_position - 2*cur_position + prev_position
+
     target_normalized = self._output_normalizer(target_acceleration)
 
     # build loss
@@ -90,6 +94,7 @@ class Model(snt.AbstractModule):
     loss = tf.reduce_mean(error[loss_mask])
     return loss
 
+  # Is this used?
   def _update(self, inputs, per_node_network_output):
     """Integrate model outputs."""
     acceleration = self._output_normalizer.inverse(per_node_network_output)

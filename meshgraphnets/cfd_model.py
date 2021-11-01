@@ -69,6 +69,7 @@ class Model(snt.AbstractModule):
   @snt.reuse_variables
   def loss(self, inputs):
     """L2 loss on velocity."""
+
     graph = self._build_graph(inputs, is_training=True)
     network_output = self._learned_model(graph)
 
