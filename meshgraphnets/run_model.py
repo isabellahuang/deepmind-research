@@ -22,6 +22,8 @@ from absl import flags
 from absl import logging
 import numpy as np
 import tensorflow.compat.v1 as tf
+
+from meshgraphnets import common
 from meshgraphnets import cfd_eval
 from meshgraphnets import cfd_model
 from meshgraphnets import cloth_eval
@@ -33,6 +35,7 @@ from meshgraphnets import dataset
 from meshgraphnets import utils
 
 import os
+import sys
 
 
 FLAGS = flags.FLAGS
@@ -53,12 +56,17 @@ flags.DEFINE_integer('batch_size', 1, 'Batch size')
 flags.DEFINE_integer('num_epochs', 50, 'Num epochs')
 flags.DEFINE_integer('num_epochs_per_validation', 5, 'Num epochs to train before validating')
 flags.DEFINE_integer('num_training_trajectories', 100, 'No. of training trajectories')
+flags.DEFINE_integer('num_testing_trajectories', 0, 'No. of trajectories to train on')
 
 
 flags.DEFINE_integer('latent_size', 128, 'Latent size')
 flags.DEFINE_integer('num_layers', 2, 'Num layers')
 flags.DEFINE_integer('message_passing_steps', 15, 'Message passing steps')
 flags.DEFINE_float('learning_rate', 1e-4, 'Message passing steps')
+flags.DEFINE_float('noise_scale', 3e-3, 'Noise scale on world pos')
+
+flags.DEFINE_bool('gripper_force_action_input', True, 'Change in gripper force as action input')
+
 
 flags.DEFINE_bool('log_stress_t', True, 'Take the log of stress at time t as feature')
 
@@ -81,6 +89,7 @@ flags.DEFINE_bool('aux_mesh_edge_distance_change', False, 'Add auxiliary loss te
 
 flags.DEFINE_integer('num_objects', 1, 'No. of objects to train on')
 flags.DEFINE_integer('n_horizon', 1, 'No. of steps in training horizon')
+
 
 
 
@@ -142,11 +151,7 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
   # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
   ds = dataset.add_targets(ds, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
 
-  # if flatten:
-  #   ds = dataset.split_and_preprocess(ds, num_epochs=1, noise_field=params['noise_field'],
-  #                                     noise_scale=params['noise'],
-  #                                     noise_gamma=params['gamma'])
-
+  test = n_horizon==LEN_TRAJ
 
   # if FLAGS.batch_size > 1:
   #   ds = dataset.batch_dataset(ds, FLAGS.batch_size)
@@ -154,8 +159,15 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
   #   ds = ds.take(1)
     # pass
 
-  if n_training_trajectories != 100:
-    ds = ds.take(n_training_trajectories)
+  noise_field = params['noise_field']
+  noise_scale = params['noise']
+
+  # if n_training_trajectories != 100:
+  if not test:
+    ds = ds.take(FLAGS.num_training_trajectories) 
+  else:
+    ds = ds.skip(FLAGS.num_training_trajectories)
+    ds = ds.take(FLAGS.num_testing_trajectories)
 
   # Pre shuffle buffer
   ds = ds.shuffle(100)
@@ -163,6 +175,7 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
   def repeat_and_shift(trajectory):
     out = {}
     for key, val in trajectory.items():
+
       shifted_lists = []
 
       for i in range(LEN_TRAJ - n_horizon + 1):
@@ -172,8 +185,28 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
 
     return tf.data.Dataset.from_tensor_slices(out)
 
+  def add_noise(frame):
+    for key, val in frame.items():
+      print(key)
+
+    noise = tf.random.normal(tf.shape(frame[noise_field]),
+                             stddev=FLAGS.noise_scale, dtype=tf.float32)
+    # don't apply noise to boundary nodes
+    mask = tf.equal(frame['node_type'], common.NodeType.NORMAL)
+    mask = tf.repeat(mask, repeats=3, axis=-1)
+
+    noise = tf.where(mask, noise, tf.zeros_like(noise))
+    frame[noise_field] += noise
+    frame['target|'+noise_field] += noise
+    return frame
+
   if n_horizon < LEN_TRAJ:
     ds =  ds.flat_map(repeat_and_shift)
+
+    # Add noise
+    ds = ds.map(add_noise, num_parallel_calls=8)
+
+
 
   ds = ds.shuffle(100)
   return ds
@@ -188,15 +221,15 @@ def evaluator_file_split():
     test_files = train_files
 
   else:
-    last_folder = '0-99_tfrecords/5e4_pd'
+    last_folder = '0-99_tfrecords/5e4_pd_filtered'
     total_folder = os.path.join(FLAGS.dataset_dir, last_folder)
     total_files = [os.path.join(last_folder, k.split(".")[0]) for k in os.listdir(total_folder)]
-    train_files = [k for k in total_files if '00000015' in k]
+    train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
+    train_files = [k for k in total_files if '00000007' in k] # circular disk
+    train_files = [k for k in total_files if '00000016' in k] # rectangular prism
+
     test_files = train_files
 
-    # train_folder = os.path.join(FLAGS.dataset_dir, '0-99_tfrecords/5e4_pd')
-    # train_files = [os.path.join('0-99_tfrecords/5e4', k.split(".")[0]) for k in os.listdir(train_folder)]
-    # test_files = [os.path.join('0-99_tfrecords/ngc', k.split(".")[0]) for k in os.listdir(total_folder) if k not in os.listdir(train_folder)]
 
   return train_files, test_files
 
@@ -216,10 +249,6 @@ def learner(model, params):
     test_ds = dataset.load_dataset(FLAGS.dataset_dir, obj_15, max(1, int(0.3 * FLAGS.num_objects)))
     # test_ds = dataset.load_dataset(FLAGS.dataset_dir, 'test', max(1, int(0.3 * FLAGS.num_objects)))
   else:
-    # train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
-    # test_files = [k for k in train_files if '00000007' in k]
-    # test_ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', max(1, int(0.3 * FLAGS.num_objects)))
-
     ### Load datasets by files in folders 
     train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
     test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
@@ -260,15 +289,32 @@ def learner(model, params):
   #                    lambda: tf.group(train_op)) # If global step > 1000
 
   losses = []
+  lowest_val_errors = [sys.maxsize]
+
 
 
   config = tf.ConfigProto()
   config.gpu_options.allow_growth = True
-  with tf.train.MonitoredTrainingSession(
-      hooks=[tf.train.StopAtStepHook(last_step=FLAGS.num_training_steps)],
-      config=config,
-      checkpoint_dir=FLAGS.checkpoint_dir,
-      save_checkpoint_steps=1000) as sess:
+  # with tf.train.MonitoredTrainingSession(
+  #     hooks=[tf.train.StopAtStepHook(last_step=FLAGS.num_training_steps)],
+  #     config=config,
+  #     checkpoint_dir=FLAGS.checkpoint_dir,
+  #     save_checkpoint_steps=1000) as sess:
+
+
+  ### Use normal saver
+  num_best_models = 2
+  saver = tf.train.Saver(max_to_keep=num_best_models)
+
+  with tf.Session() as sess:
+    ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
+    if ckpt and ckpt.model_checkpoint_path:
+      print("Restoring checkpoint")
+      saver.restore(sess, ckpt.model_checkpoint_path)
+    else:
+      print("No existing checkpoint")
+      sess.run(tf.global_variables_initializer())
+
 
     # Take in all training data for normalization stats
     # '''
@@ -277,7 +323,7 @@ def learner(model, params):
     # print("Accuulating stats")
     try:
       while True:
-        _, a = sess.run([accumulate_op, debug_op]) # currently doesnt use input, so infinite loop
+        _, a = sess.run([accumulate_op, debug_op]) 
         num_train_dp += 1
 
     except tf.errors.OutOfRangeError:
@@ -287,16 +333,50 @@ def learner(model, params):
 
     step = 0
     for i in range(FLAGS.num_epochs):
-      sess.run(train_init_op)
-      train_losses = []
+
+      ################
+      if i % FLAGS.num_epochs_per_validation == 0:
+        print("Validating")
+        sess.run(test_init_op)
+        test_losses, test_mean_errors, test_final_errors = [], [], []
+        baseline_mean_errors, baseline_final_errors = [], []
+
+        try:
+          while True:
+
+            test_loss, test_scalar_data, test_traj_data, a = sess.run([test_loss_op, test_scalar_op, test_traj_op, debug_op]) # used to be raw_loss_op
+            test_losses.append(test_loss)
+            test_mean_errors.append(test_scalar_data["pos_mean_error"])
+            test_final_errors.append(test_scalar_data["pos_final_error"])
+            baseline_mean_errors.append(test_scalar_data['baseline_pos_mean_error'])
+            baseline_final_errors.append(test_scalar_data['baseline_pos_final_error'])
+
+
+        except tf.errors.OutOfRangeError:
+          pass
+
+        ######################
+
+        # Save only if validation loss is good
+        if np.mean(test_mean_errors) <= lowest_val_errors[-1]:
+          lowest_val_errors.append(np.mean(test_mean_errors))
+          lowest_val_errors.sort()
+          lowest_val_errors = lowest_val_errors[:num_best_models]
+          print("Saving checkpoint. Lowest validation errors updated:", lowest_val_errors)
+          if FLAGS.checkpoint_dir:
+            saver.save(sess, os.path.join(FLAGS.checkpoint_dir, 'model'), global_step=global_step)
+
 
       ##########
+      sess.run(train_init_op)
+      train_losses = []
       # '''
       try:
         while True:
 
           # _, step, train_loss, a, traj_opt_data, scalar_op_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op, scalar_op]) 
           _, step, train_loss, a, traj_opt_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op]) 
+
           # _, step = sess.run([train_op, global_step])
           # train_loss, a = sess.run([loss_op, debug_op])
           ## Note to self: look at gradients
@@ -318,35 +398,11 @@ def learner(model, params):
       # '''
 
 
-      if i % FLAGS.num_epochs_per_validation == 0:
-        print("Validating")
-        sess.run(test_init_op)
-        test_losses, test_mean_errors, test_final_errors = [], [], []
-
-
-        # '''
-        try:
-          while True:
-
-            test_loss, test_scalar_data, test_traj_data, a = sess.run([test_loss_op, test_scalar_op, test_traj_op, debug_op]) # used to be raw_loss_op
-            test_losses.append(test_loss)
-            test_mean_errors.append(test_scalar_data["pos_mean_error"])
-            test_final_errors.append(test_scalar_data["pos_final_error"])
-
-
-            if step % 1000 == 0:
-              logging.info('Step %d: Avg Loss %g', step, np.mean(test_mean_errors))
-
-
-        except tf.errors.OutOfRangeError:
-          pass
-        # '''
-
       # Record losses in text file
       logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g %g', i, step, np.mean(train_losses), np.mean(test_losses), np.mean(test_mean_errors), np.mean(test_final_errors))
       if FLAGS.checkpoint_dir:
         file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
-        log_line = "%s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_mean_errors), np.mean(test_final_errors))
+        log_line = "%s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_mean_errors), np.mean(test_final_errors), np.mean(baseline_mean_errors), np.mean(baseline_final_errors))
         file.write(log_line)
         file.close()
 

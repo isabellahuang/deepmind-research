@@ -93,6 +93,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
 
   pos_error = tf.reduce_mean(tf.reduce_sum(((pos_prediction - inputs['world_pos'][:num_steps]) ** 2), axis=1), axis=-1)
+  baseline_pos_error = tf.reduce_mean(tf.reduce_sum(((inputs['world_pos'][:num_steps] - inputs['world_pos'][0]) ** 2), axis=1), axis=-1)
 
   stress_error = tf.reduce_mean((tf.squeeze(stress_prediction - log_gt_stress[:num_steps]))**2, axis=-1)
 
@@ -113,6 +114,8 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   scalars['pos_mean_error'] = tf.reduce_mean(pos_error)
   scalars['pos_final_error'] = pos_error[-1]
   scalars['all_losses'] = rollout_losses
+  scalars['baseline_pos_mean_error'] = tf.reduce_mean(baseline_pos_error)
+  scalars['baseline_pos_final_error'] = baseline_pos_error[-1]
 
 
 

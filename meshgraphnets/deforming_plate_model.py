@@ -211,8 +211,12 @@ class Model(snt.AbstractModule):
     
 
     # Use either change in force or change in gripper position as the velocity
-    nonzero_vel = tf.pad(f_force_vecs, paddings, "CONSTANT")
-    # nonzero_vel = tf.pad(f_verts_next - f_verts, paddings, "CONSTANT") 
+    if self.FLAGS.gripper_force_action_input:
+      nonzero_vel = tf.pad(f_force_vecs, paddings, "CONSTANT")
+
+    else:
+      nonzero_vel = inputs['target|world_pos'] - inputs['world_pos']
+
     velocity = tf.where(actuator_mask, nonzero_vel, zero_vel) 
     # '''
 
@@ -250,7 +254,7 @@ class Model(snt.AbstractModule):
 
   def print_debug(self, inputs):
     """L2 loss on position."""
-    return tf.reduce_mean(inputs['stress'][0])
+    return inputs['force']
     return self._node_normalizer._acc_count, self._output_normalizer._acc_count, self._edge_normalizer._acc_count, self._world_edge_normalizer._acc_count
     finger1_path = os.path.join('meshgraphnets', 'assets', 'finger1_face_uniform' + '.stl')
     f1_trimesh = trimesh.load_mesh(finger1_path)
@@ -382,7 +386,7 @@ class Model(snt.AbstractModule):
 
   def _update(self, inputs, per_node_network_output, normalize=True, accumulate=False):
     """Integrate model outputs."""
-    actuator_mask = tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
+    actuator_mask = tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE) # Where nodes are NOT actuators
     mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.NORMAL) # Only update normal nodes with predictions
     actuator_idx = tf.where(actuator_mask)
     object_idx = tf.where(mask)
@@ -395,18 +399,24 @@ class Model(snt.AbstractModule):
     paddings = [[0, pad_diff], [0, 0]]
     next_pos_gt = tf.pad(f_verts_next, paddings, "CONSTANT")
 
+    position_change_gt = inputs['target|world_pos'] - inputs['world_pos']
     # Get predictions
     if self.FLAGS.predict_log_stress_t_only:
       _ , stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
-      position_change = inputs['target|world_pos'] - inputs['world_pos']
+      position_change = position_change_gt
     elif self.FLAGS.predict_log_stress_t1_only:
       _, stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
-      position_change = inputs['target|world_pos'] - inputs['world_pos']
+      position_change = position_change_gt
     elif self.FLAGS.predict_log_stress_change_only:
       _, stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
-      position_change = inputs['target|world_pos'] - inputs['world_pos']
+      position_change = position_change_gt
     else:
       position_change, stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
+
+    # If using change in gripper pos as action input, update to next gripper position exactly
+    if not self.FLAGS.gripper_force_action_input:
+      position_change = tf.where(actuator_mask, position_change, position_change_gt)
+
 
     # Integrate forward
     curr_stress_gt = inputs['stress']
