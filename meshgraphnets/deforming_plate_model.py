@@ -254,7 +254,7 @@ class Model(snt.AbstractModule):
 
   def print_debug(self, inputs):
     """L2 loss on position."""
-    return inputs['force']
+    return tf.reduce_mean(inputs['stress']), tf.reduce_mean(inputs['pd_stress']), tf.shape(inputs['stress'])
     return self._node_normalizer._acc_count, self._output_normalizer._acc_count, self._edge_normalizer._acc_count, self._world_edge_normalizer._acc_count
     finger1_path = os.path.join('meshgraphnets', 'assets', 'finger1_face_uniform' + '.stl')
     f1_trimesh = trimesh.load_mesh(finger1_path)
@@ -318,6 +318,9 @@ class Model(snt.AbstractModule):
     elif self.FLAGS.predict_log_stress_change_t1 or self.FLAGS.predict_log_stress_change_only:
       target_stress_change = tf.math.log(inputs['target|stress'] + 1) - tf.math.log(inputs['stress'] + 1)
       combined_target = tf.concat([target_position_change, target_stress_change], 1)
+    elif self.FLAGS.predict_stress_change_t1:
+      target_stress_change = inputs['target|stress'] - inputs['stress']
+      combined_target = tf.concat([target_position_change, target_stress_change], 1)   
     else:
       target_stress_change = inputs['target|stress']
       combined_target = tf.concat([target_position_change, target_stress_change], 1)
@@ -435,6 +438,8 @@ class Model(snt.AbstractModule):
       next_stress_pred = tf.math.exp(stress_change) - 1
     elif self.FLAGS.predict_log_stress_change_t1 or self.FLAGS.predict_log_stress_change_only:
       next_stress_pred = tf.math.exp(stress_change) * (inputs['stress'] + 1) - 1
+    elif self.FLAGS.predict_stress_change_t1:
+      next_stress_pred = stress_change + inputs['stress']
     elif self.FLAGS.predict_pos_change_only:
       next_stress_pred = inputs['target|stress']
     else:

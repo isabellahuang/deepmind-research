@@ -78,40 +78,28 @@ def _parse(proto, meta):
 
 
 def load_dataset(path, split, num_objects):
-  """Load dataset."""
+  """Load dataset. Path contains all the .tfrecord files, split is a list of paths to .tfrecords"""
 
-  with open(os.path.join(path, 'meta.json'), 'r') as fp:
+
+  # Search for meta.json file 
+  meta_path = path 
+  meta_path_search_counter = 0
+  while 'meta.json' not in os.listdir(meta_path):
+    meta_path_search_counter += 1 
+    if meta_path_search_counter > 5:
+      print("No meta.json file found from", path)
+      quit()
+    meta_path = os.path.join(meta_path, '..')
+
+  with open(os.path.join(meta_path, 'meta.json'), 'r') as fp:
     meta = json.loads(fp.read())
 
-  if split in ['train', 'test']:
-    if os.environ["LOCAL_FLAG"] != "1": # If on NGC
-      train_folder = '0-99_tfrecords/5e4'
-    else:
-      train_folder = '0-99_tfrecords/5e4_pd'
 
-    tfrecords_folder = os.path.join(path, train_folder)
-    tfrecords_files = [os.path.join(tfrecords_folder, k) for k in os.listdir(tfrecords_folder)]
-    tfrecords_files = sorted(tfrecords_files)
+  assert(type(split) is list)
 
-    if split == 'train':
-      tfrecords_files = tfrecords_files[:num_objects]
-    elif split == "test":
-      tfrecords_files = tfrecords_files[-num_objects:]
-    print(split, tfrecords_files)
-
-
-    ds = tf.data.TFRecordDataset(tfrecords_files)
-
-  else:
-
-    if type(split) is list:
-      tfrecords_files = [os.path.join(path, k+'.tfrecord') for k in split]
-      tfrecords_files = sorted(tfrecords_files)
-      print("Tfrecords_files for evaluation", tfrecords_files)
-      ds = tf.data.TFRecordDataset(tfrecords_files)
-
-    else:
-      ds = tf.data.TFRecordDataset(os.path.join(path, split+'.tfrecord'))
+  tfrecords_files = sorted(split)
+  print("Tfrecords_files", tfrecords_files)
+  ds = tf.data.TFRecordDataset(tfrecords_files)
 
   ds = ds.map(functools.partial(_parse, meta=meta), num_parallel_calls=8)
   ds = ds.prefetch(1)

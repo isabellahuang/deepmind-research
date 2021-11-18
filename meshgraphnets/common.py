@@ -38,6 +38,8 @@ def sr_mesh_edges(mesh_edges):
           tf.concat([receivers, senders], axis=0))
 
 def sr_world_edges(world_edges):
+  # world_edges = tf.gather(world_edges, [0, 1], axis=1)
+
   all_senders, all_receivers = tf.unstack(world_edges, axis=1)
   difference = tf.math.subtract(all_senders, all_receivers)
   unique_edges = tf.where(tf.not_equal(difference, 0))

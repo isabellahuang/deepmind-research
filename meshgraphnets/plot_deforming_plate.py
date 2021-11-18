@@ -77,6 +77,8 @@ def main(unused_argv):
     gt_pos = np.copy(rollout_data[traj]['gt_pos'][step])
     gt_stress = np.copy(rollout_data[traj]['gt_stress'][step])
     gt_pd_stress = np.copy(rollout_data[traj]['gt_pd_stress'][step])
+    gt_force = np.copy(rollout_data[traj]['gt_force'][step])
+    world_edges = np.copy(rollout_data[traj]['world_edges'][step])
 
     # print(step, np.min(stress), np.max(stress), np.max(gt_stress))
 
@@ -102,13 +104,30 @@ def main(unused_argv):
     #######################
     # Calculate stress from positions
     # '''
+
+
+
     tets = np.copy(rollout_data[traj]['faces'][step])
     mesh_pos = np.copy(rollout_data[traj]['gt_pos'][0])
     curr_pos = np.copy(rollout_data[traj]['pred_pos'][step])
 
-    pd_stress = dcu.get_pd_vertex_stresses(E, v, mesh_pos, curr_pos, tets)
 
-    print("*******", np.mean(gt_pd_stress), np.mean(pd_stress), np.mean(gt_stress))      
+    tet_object = dcu.TetObject(E, v, tets, mesh_pos)
+    pd_stress = tet_object.get_pd_vertex_stresses(curr_pos)
+    # gt_pd_stress = tet_object.get_pd_vertex_stresses(gt_pos)
+
+
+
+    # print("*******", np.mean(gt_pd_stress), np.mean(pd_stress), np.mean(gt_stress))      
+    gripper_normal = dcu.get_gripper_normal(mesh_pos, np.copy(rollout_data[traj]['gt_pos'][-1]))
+
+    # pd_force = tet_object.get_total_surface_force(curr_pos, world_edges, gripper_normal)
+    gt_pd_force = tet_object.get_total_surface_force(gt_pos, world_edges, gripper_normal)
+
+    # vertex_forces = tet_object.vertex_forces_from_tris(curr_pos, world_edges, gripper_normal)
+    gt_vertex_forces = tet_object.vertex_forces_from_tris(gt_pos, world_edges, gripper_normal)
+
+    print(gt_pd_force, gt_force)
     # '''
 
     ######################
@@ -117,7 +136,10 @@ def main(unused_argv):
 
     # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
     # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=gt_stress[:], vmin=gt_vmin, vmax=gt_vmax)
-    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=pd_stress[:])
+    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=pd_stress[:])
+    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_pd_stress[:])
+
+    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_vertex_forces[:])
 
 
     ax.set_title('Trajectory %d Step %d' % (traj, step))
@@ -129,33 +151,45 @@ def main(unused_argv):
 
 
   # Print out final deformation and final stress predictions
-  plt.figure()
+  # plt.figure()
   gt_final_pd_stresses, final_pd_stresses = [], []
+  final_stresses = []
   gt_final_mean_defs, final_mean_defs = [], []
   gt_final_max_defs, final_max_defs = [], []
+  gt_final_pd_forces, final_pd_forces = [], []
   gripper_displacements = []
  
-  for t_idx, trajectory in enumerate(rollout_data[-2:]):
+  for t_idx, trajectory in enumerate(rollout_data[:]):
     print(t_idx)
     tets = np.copy(trajectory['faces'][0])
     mesh_pos = np.copy(trajectory['gt_pos'][0])
     gt_final_pos = np.copy(trajectory['gt_pos'][-1])
     first_pos = np.copy(trajectory['pred_pos'][0])
     final_pos = np.copy(trajectory['pred_pos'][-1])
+    gt_final_force = np.copy(trajectory['gt_force'][-1][0][0])
+    final_world_edges = np.copy(trajectory['world_edges'][-1])
 
     first_gripper_pos = np.copy(trajectory['gt_gripper_pos'][0])
     final_gripper_pos = np.copy(trajectory['gt_gripper_pos'][-1])
     gripper_displacements.append(first_gripper_pos[0] - final_gripper_pos[0])
 
+    tet_object = dcu.TetObject(E, v, tets, mesh_pos)
 
     ####### Final stress comparison
     gt_final_pd_stress = np.copy(trajectory['gt_pd_stress'][-1])
     ### Maybe final stress is different when calculated
-    # gt_final_pd_stress = dcu.get_pd_vertex_stresses(E, v, mesh_pos, gt_final_pos, tets)
+    gt_final_pd_stress = tet_object.get_pd_vertex_stresses(gt_final_pos)
 
     gt_final_pd_stresses.append(gt_final_pd_stress)
-    final_pd_stress = dcu.get_pd_vertex_stresses(E, v, mesh_pos, final_pos, tets)
+    final_pd_stress = tet_object.get_pd_vertex_stresses(final_pos)
     final_pd_stresses.append(final_pd_stress)
+    final_stress = np.copy(trajectory['pred_stress'][-1])
+    # Convert back to real stress
+    # '''
+    positive_idx = np.argwhere(final_stress > 0)
+    final_stress[positive_idx] = np.exp(final_stress[positive_idx]) - 1
+    # '''
+    final_stresses.append(final_stress)
 
     ###### Final deformation comparison
     gt_final_mean_def, gt_final_max_def, _ = utils.get_global_deformation_metrics(first_pos, gt_final_pos)
@@ -166,61 +200,103 @@ def main(unused_argv):
     final_max_defs.append(final_max_def)
 
 
+    ###### Final pd force comparison
+    
+
+    gripper_normal = dcu.get_gripper_normal(mesh_pos, gt_final_pos)
+    # gt_final_pd_force = dcu.get_total_surface_force(E, v, mesh_pos, gt_final_pos, tets, final_world_edges, gripper_normal)
+    gt_final_pd_force = tet_object.get_total_surface_force(gt_final_pos, final_world_edges, gripper_normal)
+    gt_final_pd_forces.append(gt_final_force)
+
+    
+    # final_pd_force = dcu.get_total_surface_force(E, v, mesh_pos, final_pos, tets, final_world_edges, gripper_normal)
+    final_pd_force = tet_object.get_total_surface_force(final_pos, final_world_edges, gripper_normal)
+    final_pd_forces.append(gt_final_pd_force)
+
     ### Histograms of stress
-    plt.hist(final_pd_stress, alpha=0.5)
-    plt.hist(gt_final_pd_stress, label="gt", alpha=0.5)
-    plt.legend()
-    plt.show()
+    # plt.hist(final_pd_stress, alpha=0.5)
+    # plt.hist(gt_final_pd_stress, label="gt", alpha=0.5)
+    # plt.legend()
+    # plt.show()
 
     ### Histograms of def
-    
+
 
 
   gt_final_pd_stresses_means = [np.mean(k) for k in gt_final_pd_stresses]
   final_pd_stresses_means = [np.mean(k) for k in final_pd_stresses]
   gt_final_pd_stresses_maxes = [np.max(k) for k in gt_final_pd_stresses]
   final_pd_stresses_maxes = [np.max(k) for k in final_pd_stresses]
-
+  final_stresses_means = [np.mean(k) for k in final_stresses]
+  final_stresses_maxes = [np.max(k) for k in final_stresses]
   n_train = 40
 
-  plt.scatter(gt_final_pd_stresses_means[:n_train], final_pd_stresses_means[:n_train], label="Training set")
-  plt.scatter(gt_final_pd_stresses_means[n_train:], final_pd_stresses_means[n_train:], label="Validation set")
-  plt.legend()
-  plt.plot(gt_final_pd_stresses_means, gt_final_pd_stresses_means, '-')
-  plt.xlabel("Ground truth")
-  plt.ylabel("Predicted")
-  plt.title("Gt vs. predicted final mean stress")
+
+  fig, axs = plt.subplots(2, 4)
+
+  axs[0,1].scatter(gt_final_pd_stresses_means[:n_train], final_pd_stresses_means[:n_train], label="Training set")
+  axs[0,1].scatter(gt_final_pd_stresses_means[n_train:], final_pd_stresses_means[n_train:], label="Validation set")
+  axs[0,1].legend()
+  axs[0,1].plot(gt_final_pd_stresses_means, gt_final_pd_stresses_means, '-')
+  axs[0,1].set_xlabel("Ground truth")
+  axs[0,1].set_ylabel("Predicted")
+  axs[0,1].set_title("Gt vs. predicted final mean stress (analytical)")
 
 
-  plt.figure()
-  plt.scatter(gt_final_pd_stresses_maxes[:n_train], final_pd_stresses_maxes[:n_train], label="Training set")
-  plt.scatter(gt_final_pd_stresses_maxes[n_train:], final_pd_stresses_maxes[n_train:], label="Validation set")
-  plt.legend()
-  plt.plot(gt_final_pd_stresses_maxes, gt_final_pd_stresses_maxes, '-')
-  plt.xlabel("Ground truth")
-  plt.ylabel("Predicted")
-  plt.title("Gt vs. predicted final max stress")
+  axs[0,2].scatter(gt_final_pd_stresses_means[:n_train], final_stresses_means[:n_train], label="Training set")
+  axs[0,2].scatter(gt_final_pd_stresses_means[n_train:], final_stresses_means[n_train:], label="Validation set")
+  axs[0,2].legend()
+  axs[0,2].plot(gt_final_pd_stresses_means, gt_final_pd_stresses_means, '-')
+  axs[0,2].set_xlabel("Ground truth")
+  axs[0,2].set_ylabel("Predicted")
+  axs[0,2].set_title("Gt vs. predicted final mean stress (direct prediction)")
 
 
-  plt.figure()
-  plt.scatter(gt_final_mean_defs[:n_train], final_mean_defs[:n_train], label="Training set")
-  plt.scatter(gt_final_mean_defs[n_train:], final_mean_defs[n_train:], label="Validation set")
-  plt.legend()
+  axs[1,1].scatter(gt_final_pd_stresses_maxes[:n_train], final_pd_stresses_maxes[:n_train], label="Training set")
+  axs[1,1].scatter(gt_final_pd_stresses_maxes[n_train:], final_pd_stresses_maxes[n_train:], label="Validation set")
+  axs[1,1].legend()
+  axs[1,1].plot(gt_final_pd_stresses_maxes, gt_final_pd_stresses_maxes, '-')
+  axs[1,1].set_xlabel("Ground truth")
+  axs[1,1].set_ylabel("Predicted")
+  axs[1,1].set_title("Gt vs. predicted final max stress (analytical)")
 
-  plt.plot(gt_final_mean_defs, gt_final_mean_defs, '-')
-  plt.xlabel("Ground truth")
-  plt.ylabel("Predicted")
-  plt.title("Gt vs. predicted final mean def")
 
-  plt.figure()
-  plt.scatter(gt_final_max_defs[:n_train], final_max_defs[:n_train], label="Training set")
-  plt.scatter(gt_final_max_defs[n_train:], final_max_defs[n_train:], label="Validation set")
-  plt.legend()
+  axs[1,2].scatter(gt_final_pd_stresses_maxes[:n_train], final_stresses_maxes[:n_train], label="Training set")
+  axs[1,2].scatter(gt_final_pd_stresses_maxes[n_train:], final_stresses_maxes[n_train:], label="Validation set")
+  axs[1,2].legend()
+  axs[1,2].plot(gt_final_pd_stresses_maxes, gt_final_pd_stresses_maxes, '-')
+  axs[1,2].set_xlabel("Ground truth")
+  axs[1,2].set_ylabel("Predicted")
+  axs[1,2].set_title("Gt vs. predicted final max stress (direct prediction)")
 
-  plt.plot(gt_final_max_defs, gt_final_max_defs, '-')
-  plt.xlabel("Ground truth")
-  plt.ylabel("Predicted")
-  plt.title("Gt vs. predicted final max def")
+
+  # plt.figure()
+  axs[0,0].scatter(gt_final_mean_defs[:n_train], final_mean_defs[:n_train], label="Training set")
+  axs[0,0].scatter(gt_final_mean_defs[n_train:], final_mean_defs[n_train:], label="Validation set")
+  axs[0,0].legend()
+  axs[0,0].plot(gt_final_mean_defs, gt_final_mean_defs, '-')
+  axs[0,0].set_xlabel("Ground truth")
+  axs[0,0].set_ylabel("Predicted")
+  axs[0,0].set_title("Gt vs. predicted final mean def")
+
+  # axs[1,0].figure()
+  axs[1,0].scatter(gt_final_max_defs[:n_train], final_max_defs[:n_train], label="Training set")
+  axs[1,0].scatter(gt_final_max_defs[n_train:], final_max_defs[n_train:], label="Validation set")
+  axs[1,0].legend()
+  axs[1,0].plot(gt_final_max_defs, gt_final_max_defs, '-')
+  axs[1,0].set_xlabel("Ground truth")
+  axs[1,0].set_ylabel("Predicted")
+  axs[1,0].set_title("Gt vs. predicted final max def")
+
+
+  ###### Gt final pd force ve pred final pd force
+  axs[0,3].scatter(gt_final_pd_forces[:n_train], final_pd_forces[:n_train], label="Training set")
+  axs[0,3].scatter(gt_final_pd_forces[n_train:], final_pd_forces[n_train:], label="Validation set")
+  axs[0,3].legend()
+  axs[0,3].plot(gt_final_pd_forces, gt_final_pd_forces, '-')
+  axs[0,3].set_xlabel("Ground truth")
+  axs[0,3].set_ylabel("Predicted")
+  axs[0,3].set_title("Gt vs. predicted final pd force")
 
 
   # plt.figure()

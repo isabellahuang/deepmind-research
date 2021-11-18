@@ -77,7 +77,10 @@ flags.DEFINE_bool('compute_world_edges', False, 'Whether to compute world edges'
 
 # Exactly one of these must be set to True
 flags.DEFINE_bool('predict_log_stress_t1', False, 'Predict the log stress at t1')
+
 flags.DEFINE_bool('predict_log_stress_change_t1', False, 'Predict the log of stress change from t to t1')
+flags.DEFINE_bool('predict_stress_change_t1', False, 'Predict the stress change from t to t1')
+
 
 flags.DEFINE_bool('predict_log_stress_t_only', False, 'Do not make deformation predictions. Only predict stress at time t')
 flags.DEFINE_bool('predict_log_stress_t1_only', False, 'Do not make deformation predictions. Only predict stress at time t1')
@@ -85,6 +88,7 @@ flags.DEFINE_bool('predict_log_stress_change_only', False, 'Do not make deformat
 flags.DEFINE_bool('predict_pos_change_only', False, 'Do not make stress predictions. Only predict change in pos between time t and t1')
 
 flags.DEFINE_bool('aux_mesh_edge_distance_change', False, 'Add auxiliary loss term: mesh edge distances')
+flags.DEFINE_bool('use_pd_stress', True, 'Use pd_stress rather than stress for inputs["stress"]')
 
 
 flags.DEFINE_integer('num_objects', 1, 'No. of objects to train on')
@@ -185,9 +189,14 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
 
     return tf.data.Dataset.from_tensor_slices(out)
 
+  def use_pd_stress(frame):
+    frame['stress'] = frame['pd_stress']
+    return frame
+
+
   def add_noise(frame):
-    for key, val in frame.items():
-      print(key)
+    # for key, val in frame.items():
+    #   print(key)
 
     noise = tf.random.normal(tf.shape(frame[noise_field]),
                              stddev=FLAGS.noise_scale, dtype=tf.float32)
@@ -199,6 +208,9 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
     frame[noise_field] += noise
     frame['target|'+noise_field] += noise
     return frame
+
+  if FLAGS.use_pd_stress:
+    ds = ds.map(use_pd_stress)
 
   if n_horizon < LEN_TRAJ:
     ds =  ds.flat_map(repeat_and_shift)
@@ -213,22 +225,16 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
 
 
 def evaluator_file_split():
-  # Iterate through objects
-  if os.environ["LOCAL_FLAG"] != "1": # If on NGC
-    train_folder = os.path.join(FLAGS.dataset_dir, '0-99_tfrecords', '5e4')
-    total_folder = train_folder
-    train_files = [os.path.join('0-99_tfrecords', '5e4', k.split(".")[0]) for k in os.listdir(train_folder)]
-    test_files = train_files
+  total_folder = FLAGS.dataset_dir
+  total_files = [os.path.join(total_folder, k) for k in os.listdir(total_folder)]
+  train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
+  train_files = [k for k in total_files if '00000007' in k] # circular disk
+  train_files = [k for k in total_files if '00000016' in k] # rectangular prism
 
-  else:
-    last_folder = '0-99_tfrecords/5e4_pd_filtered'
-    total_folder = os.path.join(FLAGS.dataset_dir, last_folder)
-    total_files = [os.path.join(last_folder, k.split(".")[0]) for k in os.listdir(total_folder)]
-    train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
-    train_files = [k for k in total_files if '00000007' in k] # circular disk
-    train_files = [k for k in total_files if '00000016' in k] # rectangular prism
+  # train_files = [k for k in total_files if 'valid' in k] # rectangular prism
 
-    test_files = train_files
+
+  test_files = train_files
 
 
   return train_files, test_files
@@ -242,16 +248,10 @@ def learner(model, params):
 
   train_files, test_files = evaluator_file_split()
 
-  ######## For training
-  if os.environ["LOCAL_FLAG"] != "1": # If on NGC
-    obj_15 = [k for k in train_files if '00000015' in k]
-    train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, obj_15, FLAGS.num_objects)
-    test_ds = dataset.load_dataset(FLAGS.dataset_dir, obj_15, max(1, int(0.3 * FLAGS.num_objects)))
-    # test_ds = dataset.load_dataset(FLAGS.dataset_dir, 'test', max(1, int(0.3 * FLAGS.num_objects)))
-  else:
-    ### Load datasets by files in folders 
-    train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
-    test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
+
+  ### Load datasets by files in folders 
+  train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
+  test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
 
 
 
@@ -264,13 +264,14 @@ def learner(model, params):
   iterator = tf.data.Iterator.from_structure(train_ds.output_types, train_ds.output_shapes)
 
   inputs = iterator.get_next()
+
   single_train_init_op = iterator.make_initializer(single_train_ds)
   train_init_op = iterator.make_initializer(train_ds)
   test_init_op = iterator.make_initializer(test_ds)
 
 
   loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
-  test_loss_op, test_traj_op, test_scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory
+  test_loss_op, test_traj_op, test_scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory.
 
   debug_op = model.print_debug(inputs)
 
@@ -306,7 +307,7 @@ def learner(model, params):
   num_best_models = 2
   saver = tf.train.Saver(max_to_keep=num_best_models)
 
-  with tf.Session() as sess:
+  with tf.Session(config=config) as sess:
     ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
     if ckpt and ckpt.model_checkpoint_path:
       print("Restoring checkpoint")
@@ -330,41 +331,9 @@ def learner(model, params):
       print("Accumulated stats. Total number of train points:", num_train_dp)
       pass
     # '''
-
     step = 0
     for i in range(FLAGS.num_epochs):
 
-      ################
-      if i % FLAGS.num_epochs_per_validation == 0:
-        print("Validating")
-        sess.run(test_init_op)
-        test_losses, test_mean_errors, test_final_errors = [], [], []
-        baseline_mean_errors, baseline_final_errors = [], []
-
-        try:
-          while True:
-
-            test_loss, test_scalar_data, test_traj_data, a = sess.run([test_loss_op, test_scalar_op, test_traj_op, debug_op]) # used to be raw_loss_op
-            test_losses.append(test_loss)
-            test_mean_errors.append(test_scalar_data["pos_mean_error"])
-            test_final_errors.append(test_scalar_data["pos_final_error"])
-            baseline_mean_errors.append(test_scalar_data['baseline_pos_mean_error'])
-            baseline_final_errors.append(test_scalar_data['baseline_pos_final_error'])
-
-
-        except tf.errors.OutOfRangeError:
-          pass
-
-        ######################
-
-        # Save only if validation loss is good
-        if np.mean(test_mean_errors) <= lowest_val_errors[-1]:
-          lowest_val_errors.append(np.mean(test_mean_errors))
-          lowest_val_errors.sort()
-          lowest_val_errors = lowest_val_errors[:num_best_models]
-          print("Saving checkpoint. Lowest validation errors updated:", lowest_val_errors)
-          if FLAGS.checkpoint_dir:
-            saver.save(sess, os.path.join(FLAGS.checkpoint_dir, 'model'), global_step=global_step)
 
 
       ##########
@@ -397,12 +366,55 @@ def learner(model, params):
         pass
       # '''
 
+      ################
+      if i % FLAGS.num_epochs_per_validation == 0:
+        print("Validating")
+        sess.run(test_init_op)
+        test_losses, test_pos_mean_errors, test_pos_final_errors = [], [], []
+        test_stress_mean_errors, test_stress_final_errors = [], []
+        baseline_pos_mean_errors, baseline_pos_final_errors = [], []
+        baseline_stress_mean_errors, baseline_stress_final_errors = [], []
+
+        try:
+          while True:
+
+            test_loss, test_scalar_data, test_traj_data, a = sess.run([test_loss_op, test_scalar_op, test_traj_op, debug_op]) # used to be raw_loss_op
+            test_losses.append(test_loss)
+            test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
+            test_pos_final_errors.append(test_scalar_data["pos_final_error"])
+            baseline_pos_mean_errors.append(test_scalar_data['baseline_pos_mean_error'])
+            baseline_pos_final_errors.append(test_scalar_data['baseline_pos_final_error'])
+
+            test_stress_mean_errors.append(test_scalar_data["stress_mean_error"])
+            test_stress_final_errors.append(test_scalar_data["stress_final_error"])
+            baseline_stress_mean_errors.append(test_scalar_data['baseline_stress_mean_error'])
+            baseline_stress_final_errors.append(test_scalar_data['baseline_stress_final_error'])
+
+
+
+        except tf.errors.OutOfRangeError:
+          pass
+
+
+        # Save only if validation loss is good
+        if np.mean(test_losses) <= lowest_val_errors[-1]:
+          lowest_val_errors.append(np.mean(test_losses))
+          lowest_val_errors.sort()
+          lowest_val_errors = lowest_val_errors[:num_best_models]
+          print("Saving checkpoint. Lowest validation errors updated:", lowest_val_errors)
+          if FLAGS.checkpoint_dir:
+            saver.save(sess, os.path.join(FLAGS.checkpoint_dir, 'model'), global_step=global_step)
+        ######################
+
+
 
       # Record losses in text file
-      logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g %g', i, step, np.mean(train_losses), np.mean(test_losses), np.mean(test_mean_errors), np.mean(test_final_errors))
+      logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
       if FLAGS.checkpoint_dir:
         file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
-        log_line = "%s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_mean_errors), np.mean(test_final_errors), np.mean(baseline_mean_errors), np.mean(baseline_final_errors))
+        log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
+          np.mean(test_pos_final_errors), np.mean(baseline_pos_mean_errors), np.mean(baseline_pos_final_errors), \
+          np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors))
         file.write(log_line)
         file.close()
 

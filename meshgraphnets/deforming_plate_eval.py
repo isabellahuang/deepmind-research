@@ -32,21 +32,33 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
       curr_stress_feed = inputs['stress'][step]
 
 
-    next_pos_pred, next_stress_pred, loss_val = model({**initial_state,
+    model_input_dict = {**initial_state,
                         'world_pos': cur_pos, ### JUST FOR DEBUGGING used inputs['world_pos'][step]
                         'target|world_pos': inputs['target|world_pos'][step],
                         'stress': curr_stress_feed, #in raw units
-                        'target|stress': inputs['target|stress'][step],
-                        'world_edges': inputs['world_edges'][step], # Use if not trained with world edges in graph
+                        'world_edges': inputs['world_edges'][step],
                         'force': inputs['force'][step],
-                        'target|force': inputs['target|force'][step]}, normalize, accumulate)
+                        'target|force': inputs['target|force'][step],
+                        'target|stress': inputs['target|stress'][step]}
+
+    # model_input_dict['world_edges'] = inputs['mesh_edges'][step]
+
+    # if not FLAGS.compute_world_edges:
+      # model_input_dict['world_edges'] = inputs['world_edges'][step], # Use if not trained with world edges in graph
+
+    # if FLAGS.gripper_force_action_input:
+    #   model_input_dict['force'] = inputs['force'][step]
+    #   model_input_dict['target|force'] = inputs['target|force'][step]
+
+
+    next_pos_pred, next_stress_pred, loss_val = model(model_input_dict, normalize, accumulate)
 
                         
     # gripper_pos_trajectory = gripper_pos_trajectory.write(step, curr_gripper_pos)
     trajectory = trajectory.write(step, cur_pos)
 
     if FLAGS.predict_log_stress_t_only:
-      log_stress = tf.math.log(next_stress_pred + 1)
+      log_stress = tf.math.log(next_stress_pred + 1) # Next stress pred is actually stress now, at time t
     else:
       log_stress = tf.math.log(curr_stress + 1)
     stress_trajectory = stress_trajectory.write(step, log_stress)
@@ -96,6 +108,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   baseline_pos_error = tf.reduce_mean(tf.reduce_sum(((inputs['world_pos'][:num_steps] - inputs['world_pos'][0]) ** 2), axis=1), axis=-1)
 
   stress_error = tf.reduce_mean((tf.squeeze(stress_prediction - log_gt_stress[:num_steps]))**2, axis=-1)
+  baseline_stress_error = tf.reduce_mean((tf.squeeze(log_gt_stress[:num_steps] - log_gt_stress[0]))**2, axis=-1)
 
 
   # scalars = {'mse_%d_steps' % horizon: tf.reduce_mean(error[1:horizon+1])
@@ -116,7 +129,8 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   scalars['all_losses'] = rollout_losses
   scalars['baseline_pos_mean_error'] = tf.reduce_mean(baseline_pos_error)
   scalars['baseline_pos_final_error'] = baseline_pos_error[-1]
-
+  scalars['baseline_stress_mean_error'] = tf.reduce_mean(baseline_stress_error)
+  scalars['baseline_stress_final_error'] = baseline_stress_error[-1]
 
 
   traj_ops = {
@@ -128,6 +142,8 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
       'gt_gripper_pos': inputs['gripper_pos'],
       'pred_pos': pos_prediction,
       'pred_stress': stress_prediction,
+      'gt_force': inputs['force'],
+      'world_edges': inputs['world_edges'],
       # 'avg_gt_stress': tf.shape(log_gt_stress[:num_steps]), #(n_horizon, n_nodes, 1)
       # 'avg_pred_stress': tf.shape(stress_prediction) #(n_horizon, n_nodes, 1)
       'avg_gt_stress': tf.reduce_mean(tf.squeeze(log_gt_stress[:num_steps], axis=-1), axis=-1), #(n_horizon, n_nodes, 1)

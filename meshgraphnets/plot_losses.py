@@ -11,8 +11,8 @@ args = parser.parse_args()
 
 
 # initialize figures
-# fig, (ax1, ax2) = plt.subplots(2)
-fig, ax2 = plt.subplots(1)
+fig, (ax1, ax2) = plt.subplots(2)
+# fig, ax2 = plt.subplots(1)
 plt.figure(3)
 
 
@@ -27,37 +27,55 @@ for f_ind, folder in enumerate(folders):
 
 	train_losses = []
 	test_losses = []
-	test_mean_errors, test_final_errors = [], []
-	baseline_mean_error, baseline_final_error = None, None
+	test_pos_mean_errors, test_pos_final_errors = [], []
+	test_stress_mean_errors, test_stress_final_errors = [], []
+	baseline_pos_mean_error, baseline_pos_final_error = None, None
+	baseline_stress_mean_error, baseline_stress_final_error = None, None
+
 	with open(loss_file, newline='') as csvfile:
 		reader = csv.reader(csvfile, delimiter=',', quotechar='|')
 
 		for row in reader:
 			train_losses.append(float(row[1]))
 			test_losses.append(float(row[2]))
-			test_mean_errors.append(float(row[3]))
-			test_final_errors.append(float(row[4]))
+			test_pos_mean_errors.append(float(row[3]))
+			test_pos_final_errors.append(float(row[4]))
 
-		if len(row) >= 7:
-			baseline_mean_error = float(row[5])
-			baseline_final_error = float(row[6])
+			if len(row) >= 8:
+				baseline_pos_mean_error = float(row[5])
+				baseline_pos_final_error = float(row[6])
+				test_stress_mean_errors.append(float(row[7]))
+				test_stress_final_errors.append(float(row[8]))
+				baseline_stress_mean_error = float(row[9])
+				baseline_stress_final_error = float(row[10])
 
 
-	# ax1.plot(train_losses, label="Train loss " + folder)
-	# ax1.plot(test_losses, label="Test loss " + folder)
+	ax1.plot(train_losses, label="Train loss " + folder)
+	ax1.plot(test_losses, label="Test loss " + folder)
+	ax1.legend()
 	K = 150
 	ax2.plot(train_losses[:], label="Train loss " + folder, color=colors[f_ind])
 	ax2.set_title("Train losses")
 	ax2.legend()
 
 	plt.figure(3)
-	plt.plot(test_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
-	plt.plot(test_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
+	plt.plot(test_pos_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
+	plt.plot(test_pos_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
 	plt.ylabel("Error [m]")
-
-	if baseline_mean_error and baseline_final_error:
-		plt.plot([baseline_mean_error] * len(test_mean_errors), color='gray')
-		plt.plot([baseline_final_error] * len(test_final_errors), '--', color='gray')
-	plt.title("Test losses")
+	if baseline_pos_mean_error and baseline_pos_final_error:
+		plt.plot([baseline_pos_mean_error] * len(test_pos_mean_errors), color='gray')
+		plt.plot([baseline_pos_final_error] * len(test_pos_final_errors), '--', color='gray')
+	plt.title("Pos test losses")
 	plt.legend()
+
+	plt.figure(4)
+	plt.plot(test_stress_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
+	plt.plot(test_stress_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
+	plt.ylabel("Error [log Pa]")
+	if baseline_stress_mean_error and baseline_stress_final_error:
+		plt.plot([baseline_stress_mean_error] * len(test_stress_mean_errors), color='gray')
+		plt.plot([baseline_stress_final_error] * len(test_stress_final_errors), '--', color='gray')
+	plt.title("Stress test losses")
+	plt.legend()
+
 plt.show()
