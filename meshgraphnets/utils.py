@@ -13,6 +13,9 @@ def stress_t_as_node_feature(FLAGS):
 		return False
 	return True
 
+def using_dm_dataset(FLAGS):
+	return 'deforming_plate_data' in FLAGS.dataset_dir
+
 
 def get_global_deformation_metrics(undeformed_mesh, deformed_mesh, get_field=False):
     """Get the mean and max deformation of the nodes over the entire mesh.

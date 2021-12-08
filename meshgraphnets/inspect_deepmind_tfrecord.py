@@ -1,4 +1,4 @@
-# python -m meshgraphnets.read_and_write_tfrecord
+# python -m meshgraphnets.inspect_deepmind_tfrecord
 # For filtering out trajectories that have too much global motion
 
 import tensorflow.compat.v1 as tf
@@ -79,10 +79,12 @@ def evaluator_file_split():
 
   return train_files, test_files
 
-write = True
+write = False
 
-files_folder = '../../results_mgn_fresh/0-9999/0-99_tfrecords/5e4_pd'
-tfrecord_files = [os.path.join('0-99_tfrecords/pd', k.split(".")[0]) for k in os.listdir(files_folder)]
+files_folder = 'meshgraphnets/deforming_plate_data/deforming_plate'
+tfrecord_files = [os.path.join(files_folder, k.split(".")[0]) for k in os.listdir(files_folder)]
+print(tfrecord_files)
+quit()
 
 train_files, test_files = evaluator_file_split()
 

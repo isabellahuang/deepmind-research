@@ -11,6 +11,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg
 
+import tensorflow.compat.v1 as tf
+tf.enable_eager_execution()
+
 from meshgraphnets import utils
 
 FLAGS = flags.FLAGS
@@ -20,6 +23,74 @@ import sys
 sys.path.append("..")
 import data_creator_utils as dcu
 
+
+
+def triangles_to_edges(faces):
+  """Computes mesh edges from triangles."""
+  # collect edges from triangles
+
+  if faces.shape[1] == 4:
+    edges = tf.concat([faces[:, 0:2], #0, 1
+                     faces[:, 1:3], # 1, 2
+                     faces[:, 2:4], # 2, 3
+                     tf.stack([faces[:, 2], faces[:, 0]], axis=1), # 0, 2
+                     tf.stack([faces[:, 3], faces[:, 0]], axis=1), # 0, 3
+                     tf.stack([faces[:, 1], faces[:, 3]], axis=1)], axis=0)
+  else:
+    edges = tf.concat([faces[:, 0:2],
+                       faces[:, 1:3],
+                       tf.stack([faces[:, 2], faces[:, 0]], axis=1)], axis=0)
+
+
+
+  # those edges are sometimes duplicated (within the mesh) and sometimes
+  # single (at the mesh boundary).
+  # sort & pack edges as single tf.int64
+  receivers = tf.reduce_min(edges, axis=1)
+  senders = tf.reduce_max(edges, axis=1)
+  packed_edges = tf.bitcast(tf.stack([senders, receivers], axis=1), tf.int64)
+  # remove duplicates and unpack
+  unique_edges = tf.bitcast(tf.unique(packed_edges)[0], tf.int32)
+  senders, receivers = tf.unstack(unique_edges, axis=1)
+  # create two-way connectivity
+
+  return (tf.concat([senders, receivers], axis=0),
+          tf.concat([receivers, senders], axis=0))
+
+
+def squared_dist(A, B):
+  row_norms_A = tf.reduce_sum(tf.square(A), axis=1)
+  row_norms_A = tf.reshape(row_norms_A, [-1, 1])  # Column vector.
+
+  row_norms_B = tf.reduce_sum(tf.square(B), axis=1)
+  row_norms_B = tf.reshape(row_norms_B, [1, -1])  # Row vector.
+
+  return row_norms_A - 2 * tf.matmul(A, tf.transpose(B)) + row_norms_B
+
+
+def construct_world_edges(world_pos, node_type):
+
+  deformable_idx = tf.where(tf.equal(node_type[:, 0], 1))
+  actuator_idx = tf.where(tf.equal(node_type[:, 0], 0))
+  B = tf.squeeze(tf.gather(world_pos, deformable_idx))
+  A = tf.squeeze(tf.gather(world_pos, actuator_idx))
+
+  thresh = 0.005
+
+
+  thresh = 0.03
+
+  # ''' Tried and true
+  dists = squared_dist(A, B)
+
+  rel_close_pair_idx = tf.where(tf.math.less(dists, thresh ** 2))
+  close_pair_actuator = tf.gather(actuator_idx, rel_close_pair_idx[:,0])
+  close_pair_def = tf.gather(deformable_idx, rel_close_pair_idx[:,1])
+  close_pair_idx = tf.concat([close_pair_actuator, close_pair_def], 1)
+  senders, receivers = tf.unstack(close_pair_idx, 2, axis=1)
+
+  return (tf.concat([senders, receivers], axis=0),
+          tf.concat([receivers, senders], axis=0))
 
 def main(unused_argv):
   with open(FLAGS.rollout_path, 'rb') as fp:
@@ -48,6 +119,8 @@ def main(unused_argv):
   sorted_R_list = sorted_R_list[:int(len(sorted_R_list)/2)]
 
   def animate(num):
+
+
     step = (num*skip) % num_steps
     traj = (num*skip) // num_steps
 
@@ -70,15 +143,21 @@ def main(unused_argv):
     ax.set_ylim(mid_y - max_range, mid_y + max_range)
     ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
+    dm_dataset = 'gt_force' not in rollout_data[traj].keys()
+
 
     pos = np.copy(rollout_data[traj]['pred_pos'][step])
     stress = np.copy(rollout_data[traj]['pred_stress'][step])
 
     gt_pos = np.copy(rollout_data[traj]['gt_pos'][step])
     gt_stress = np.copy(rollout_data[traj]['gt_stress'][step])
-    gt_pd_stress = np.copy(rollout_data[traj]['gt_pd_stress'][step])
-    gt_force = np.copy(rollout_data[traj]['gt_force'][step])
-    world_edges = np.copy(rollout_data[traj]['world_edges'][step])
+
+    if not dm_dataset:
+      gt_force = np.copy(rollout_data[traj]['gt_force'][step])
+      gt_pd_stress = np.copy(rollout_data[traj]['gt_pd_stress'][step])
+      world_edges = np.copy(rollout_data[traj]['world_edges'][step])
+
+
 
     # print(step, np.min(stress), np.max(stress), np.max(gt_stress))
 
@@ -105,6 +184,32 @@ def main(unused_argv):
     # Calculate stress from positions
     # '''
 
+    gt_final_pos = np.copy(rollout_data[traj]['gt_pos'][-1])
+    pred_final_pos = np.copy(rollout_data[traj]['pred_pos'][-1])
+    pos_error = np.copy(rollout_data[traj]['pos_error'])
+    baseline_pos_error = np.copy(rollout_data[traj]['baseline_pos_error'])
+    print(gt_final_pos.shape, pred_final_pos.shape)
+    mse = np.square(gt_final_pos - pred_final_pos).mean()
+    print("MSE", mse)
+    print("Sum  gt final pos", np.sum(gt_final_pos))
+    print("Sum  pred final pos", np.sum(pred_final_pos))
+    # print(pos_error)
+
+    all_gt_pos = np.copy(rollout_data[traj]['gt_pos'])
+    all_pred_pos = np.copy(rollout_data[traj]['pred_pos'])
+    our_pos_error = np.mean(np.sum(np.square(all_gt_pos - all_pred_pos), axis=-1), axis=-1)
+
+    print(np.mean(np.sqrt(our_pos_error)))
+
+
+
+    faces = np.copy(rollout_data[traj]['faces'][0])
+    faces_tf = tf.convert_to_tensor(faces)
+
+    node_type = np.copy(rollout_data[traj]['node_type'][0])
+
+    # mesh_senders, mesh_receivers = construct_world_edges(tf.convert_to_tensor(gt_pos), tf.convert_to_tensor(node_type))
+
 
 
     tets = np.copy(rollout_data[traj]['faces'][step])
@@ -118,17 +223,18 @@ def main(unused_argv):
 
 
 
-    # print("*******", np.mean(gt_pd_stress), np.mean(pd_stress), np.mean(gt_stress))      
-    gripper_normal = dcu.get_gripper_normal(mesh_pos, np.copy(rollout_data[traj]['gt_pos'][-1]))
+    if not dm_dataset:
+      # print("*******", np.mean(gt_pd_stress), np.mean(pd_stress), np.mean(gt_stress))      
+      gripper_normal = dcu.get_gripper_normal(mesh_pos, np.copy(rollout_data[traj]['gt_pos'][-1]))
 
-    # pd_force = tet_object.get_total_surface_force(curr_pos, world_edges, gripper_normal)
-    gt_pd_force = tet_object.get_total_surface_force(gt_pos, world_edges, gripper_normal)
+      # pd_force = tet_object.get_total_surface_force(curr_pos, world_edges, gripper_normal)
+      gt_pd_force = tet_object.get_total_surface_force(gt_pos, world_edges, gripper_normal)
 
-    # vertex_forces = tet_object.vertex_forces_from_tris(curr_pos, world_edges, gripper_normal)
-    gt_vertex_forces = tet_object.vertex_forces_from_tris(gt_pos, world_edges, gripper_normal)
+      # vertex_forces = tet_object.vertex_forces_from_tris(curr_pos, world_edges, gripper_normal)
+      gt_vertex_forces = tet_object.vertex_forces_from_tris(gt_pos, world_edges, gripper_normal)
 
-    print(gt_pd_force, gt_force)
-    # '''
+      print(gt_pd_force, gt_force)
+      # '''
 
     ######################
 
@@ -139,8 +245,17 @@ def main(unused_argv):
     # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=pd_stress[:])
     # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_pd_stress[:])
 
-    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_vertex_forces[:])
+    ##################
+    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_vertex_forces[:])
 
+    # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=pd_stress[:])
+    X, Y, Z  = pos[:, 0], pos[:, 1], pos[:, 2]
+    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=pd_stress[:])
+
+    print(node_type.shape)
+    # Plot mesh edges
+    # for p, q in zip(mesh_senders, mesh_receivers):
+      # ax.plot([X[p], X[q]], [Y[p], Y[q]], [Z[p], Z[q]], 'ro-')
 
     ax.set_title('Trajectory %d Step %d' % (traj, step))
     return fig,
@@ -148,7 +263,10 @@ def main(unused_argv):
   _ = animation.FuncAnimation(fig, animate, frames=num_frames, interval=100)
   plt.show(block=True)
 
+  dm_dataset = 'gt_force' not in trajectory.keys()
 
+  if dm_dataset:
+    quit()
 
   # Print out final deformation and final stress predictions
   # plt.figure()
@@ -158,6 +276,8 @@ def main(unused_argv):
   gt_final_max_defs, final_max_defs = [], []
   gt_final_pd_forces, final_pd_forces = [], []
   gripper_displacements = []
+
+
  
   for t_idx, trajectory in enumerate(rollout_data[:]):
     print(t_idx)

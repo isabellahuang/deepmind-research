@@ -20,6 +20,9 @@ import enum
 import tensorflow.compat.v1 as tf
 import sys
 
+from meshgraphnets import utils
+
+
 class NodeType(enum.IntEnum):
   NORMAL = 0
   OBSTACLE = 1
@@ -48,6 +51,7 @@ def sr_world_edges(world_edges):
 
   return (tf.concat([senders, receivers], axis=0),
           tf.concat([receivers, senders], axis=0))
+  
 # This is applicable only to flat meshes
 def triangles_to_edges(faces):
   """Computes mesh edges from triangles."""
@@ -95,7 +99,7 @@ def squared_dist_point(point, others, thresh):
     sq_thresh = thresh ** 2
     return tf.where(tf.math.less(dists, sq_thresh))
 
-def construct_world_edges(world_pos, node_type):
+def construct_world_edges(world_pos, node_type, FLAGS):
 
   deformable_idx = tf.where(tf.not_equal(node_type[:, 0], NodeType.OBSTACLE))
   actuator_idx = tf.where(tf.equal(node_type[:, 0], NodeType.OBSTACLE))
@@ -103,6 +107,10 @@ def construct_world_edges(world_pos, node_type):
   A = tf.squeeze(tf.gather(world_pos, actuator_idx))
 
   thresh = 0.005
+
+  if utils.using_dm_dataset(FLAGS):
+    thresh = 0.03
+
   # ''' Tried and true
   dists = squared_dist(A, B)
 

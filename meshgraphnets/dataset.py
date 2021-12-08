@@ -94,7 +94,6 @@ def load_dataset(path, split, num_objects):
   with open(os.path.join(meta_path, 'meta.json'), 'r') as fp:
     meta = json.loads(fp.read())
 
-
   assert(type(split) is list)
 
   tfrecords_files = sorted(split)

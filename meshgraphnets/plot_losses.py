@@ -68,6 +68,7 @@ for f_ind, folder in enumerate(folders):
 	plt.title("Pos test losses")
 	plt.legend()
 
+	'''
 	plt.figure(4)
 	plt.plot(test_stress_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
 	plt.plot(test_stress_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
@@ -77,5 +78,6 @@ for f_ind, folder in enumerate(folders):
 		plt.plot([baseline_stress_final_error] * len(test_stress_final_errors), '--', color='gray')
 	plt.title("Stress test losses")
 	plt.legend()
+	'''
 
 plt.show()

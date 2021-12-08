@@ -15,6 +15,9 @@
 # limitations under the License.
 # ============================================================================
 """Runs the learner/evaluator."""
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+import sys
 
 import pickle
 from absl import app
@@ -34,8 +37,7 @@ from meshgraphnets import core_model
 from meshgraphnets import dataset
 from meshgraphnets import utils
 
-import os
-import sys
+
 
 
 FLAGS = flags.FLAGS
@@ -64,6 +66,8 @@ flags.DEFINE_integer('num_layers', 2, 'Num layers')
 flags.DEFINE_integer('message_passing_steps', 15, 'Message passing steps')
 flags.DEFINE_float('learning_rate', 1e-4, 'Message passing steps')
 flags.DEFINE_float('noise_scale', 3e-3, 'Noise scale on world pos')
+
+flags.DEFINE_bool('noise_on_adjacent_step', True, 'Add perturbation to both t and t + 1 step. If False, add only to t step.')
 
 flags.DEFINE_bool('gripper_force_action_input', True, 'Change in gripper force as action input')
 
@@ -106,7 +110,8 @@ PARAMETERS = {
                   size=4, batch=16, model=deforming_plate_model, evaluator=deforming_plate_eval),
 }
 
-LEN_TRAJ = 50 - 2
+LEN_TRAJ = 0 
+
 
 def classification_accuracy_ranking(predicted, actual, percentile):
   actual_threshold = np.percentile(actual, percentile)
@@ -151,11 +156,13 @@ def classification_accuracy_threshold(predicted, actual, percentile):
 
 
 
-def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectories=100):
+def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=100):
   # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
   ds = dataset.add_targets(ds, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
-
-  test = n_horizon==LEN_TRAJ
+  
+  test = not n_horizon
+  if test:
+    n_horizon = LEN_TRAJ
 
   # if FLAGS.batch_size > 1:
   #   ds = dataset.batch_dataset(ds, FLAGS.batch_size)
@@ -173,13 +180,13 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
     ds = ds.skip(FLAGS.num_training_trajectories)
     ds = ds.take(FLAGS.num_testing_trajectories)
 
-  # Pre shuffle buffer
+
+  # Shuffle trajectories selected for training
   ds = ds.shuffle(100)
 
   def repeat_and_shift(trajectory):
     out = {}
     for key, val in trajectory.items():
-
       shifted_lists = []
 
       for i in range(LEN_TRAJ - n_horizon + 1):
@@ -206,21 +213,21 @@ def get_flattened_dataset(ds, params, n_horizon=LEN_TRAJ, n_training_trajectorie
 
     noise = tf.where(mask, noise, tf.zeros_like(noise))
     frame[noise_field] += noise
-    frame['target|'+noise_field] += noise
+    if FLAGS.noise_on_adjacent_step:
+      frame['target|'+noise_field] += noise
     return frame
 
   if FLAGS.use_pd_stress:
     ds = ds.map(use_pd_stress)
 
-  if n_horizon < LEN_TRAJ:
+  if not test:
     ds =  ds.flat_map(repeat_and_shift)
 
     # Add noise
     ds = ds.map(add_noise, num_parallel_calls=8)
 
 
-
-  ds = ds.shuffle(100)
+  # ds = ds.shuffle(100)
   return ds
 
 
@@ -231,11 +238,10 @@ def evaluator_file_split():
   train_files = [k for k in total_files if '00000007' in k] # circular disk
   train_files = [k for k in total_files if '00000016' in k] # rectangular prism
 
-  # train_files = [k for k in total_files if 'valid' in k] # rectangular prism
-
+  if utils.using_dm_dataset(FLAGS):
+    train_files = [k for k in total_files if 'valid' in k] # MGN dataset
 
   test_files = train_files
-
 
   return train_files, test_files
 
@@ -253,14 +259,9 @@ def learner(model, params):
   train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
   test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
 
-
-
   train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, n_training_trajectories=FLAGS.num_training_trajectories)
   single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, n_training_trajectories=FLAGS.num_training_trajectories)
-
-
   test_ds = get_flattened_dataset(test_ds, params)
-
   iterator = tf.data.Iterator.from_structure(train_ds.output_types, train_ds.output_shapes)
 
   inputs = iterator.get_next()
@@ -325,6 +326,8 @@ def learner(model, params):
     try:
       while True:
         _, a = sess.run([accumulate_op, debug_op]) 
+        print(np.unique(a[0]))
+        print("---")
         num_train_dp += 1
 
     except tf.errors.OutOfRangeError:
@@ -341,8 +344,10 @@ def learner(model, params):
       train_losses = []
       # '''
       try:
+        train_counter = 0
         while True:
-
+          # print(train_counter, "Training")
+          # train_counter += 1
           # _, step, train_loss, a, traj_opt_data, scalar_op_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op, scalar_op]) 
           _, step, train_loss, a, traj_opt_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op]) 
 
@@ -376,8 +381,10 @@ def learner(model, params):
         baseline_stress_mean_errors, baseline_stress_final_errors = [], []
 
         try:
+          validation_counter = 0
           while True:
-
+            # print(validation_counter, "Validating trajectory")
+            validation_counter += 1
             test_loss, test_scalar_data, test_traj_data, a = sess.run([test_loss_op, test_scalar_op, test_traj_op, debug_op]) # used to be raw_loss_op
             test_losses.append(test_loss)
             test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
@@ -452,9 +459,7 @@ def evaluator(model, params):
 
   for ot, obj_file in enumerate(test_objects):
     print("===", obj_file, ot, "of", len(test_files))
-
-    # ds = dataset.load_dataset(FLAGS.dataset_dir, FLAGS.rollout_split)
-    ds = dataset.load_dataset(FLAGS.dataset_dir, obj_file, FLAGS.num_objects)
+    ds = dataset.load_dataset(FLAGS.dataset_dir, [obj_file], FLAGS.num_objects)
     ds = dataset.add_targets(ds, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
     inputs = tf.data.make_one_shot_iterator(ds).get_next()
     _, traj_ops, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS)
@@ -464,6 +469,9 @@ def evaluator(model, params):
     pred_stress_output = traj_ops['pred_stress']
     # grad_op = tf.gradients(pred_stress_output, inputs['world_pos'])
     # grad_op = tf.gradients(scalar_op['actual_final_stress'], inputs['stress'], unconnected_gradients='zero') # This one for gradients
+
+    grad_op = tf.gradients(scalar_op['pred_final_pos'], inputs['mesh_pos'])
+
 
     try:
       tf.train.create_global_step()
@@ -494,11 +502,20 @@ def evaluator(model, params):
 
       try:
         while True:
-        # for traj_idx in range(FLAGS.num_rollouts):
-        # for traj_idx in range(5):
+        # for traj_idx in range(10):
           logging.info('Rollout trajectory %d', traj_idx)
           traj_idx += 1
+
           scalar_data, traj_data = sess.run([scalar_op, traj_ops])
+          # scalar_data, traj_data, grad_data = sess.run([scalar_op, traj_ops, grad_op])
+
+          '''
+          grad_data = sess.run([grad_op])
+          print(grad_data)
+          print(type(grad_data[0][0]))
+          print(grad_data[0][0].shape)
+          quit()
+          '''
 
           trajectories.append(traj_data)
           scalars.append(scalar_data)
@@ -522,11 +539,18 @@ def evaluator(model, params):
           pred_final_deformations['max'].append(max_p)
           pred_final_deformations['median'].append(median_p)
 
+          print("Final error", scalar_data['pos_final_error'])
+          print("Baseline final error", scalar_data['baseline_pos_final_error'])
+          print("Sum of gt final pos", np.sum(traj_data['gt_pos'][-1]))
+          print("Sum of pred final pos", np.sum(traj_data['pred_pos'][-1]))
+          # quit()
+
 
           # '''
 
       except tf.errors.OutOfRangeError:
         pass
+
 
       ################
       '''
@@ -595,6 +619,14 @@ def main(argv):
   del argv
   tf.enable_resource_variables()
   tf.disable_eager_execution()
+
+  global LEN_TRAJ
+  if utils.using_dm_dataset(FLAGS):
+    LEN_TRAJ = 400 - 2
+  else:
+    LEN_TRAJ = 50 - 2
+
+
   params = PARAMETERS[FLAGS.model]
 
   output_size = params['size']
@@ -610,6 +642,10 @@ def main(argv):
     learner(model, params)
   elif FLAGS.mode == 'eval':
     evaluator(model, params)
+
+
+
+
 
 if __name__ == '__main__':
   app.run(main)
