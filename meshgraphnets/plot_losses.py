@@ -50,7 +50,7 @@ for f_ind, folder in enumerate(folders):
 				baseline_stress_final_error = float(row[10])
 
 
-	ax1.plot(train_losses, label="Train loss " + folder)
+	# ax1.plot(train_losses, label="Train loss " + folder)
 	ax1.plot(test_losses, label="Test loss " + folder)
 	ax1.legend()
 	K = 150
@@ -68,16 +68,16 @@ for f_ind, folder in enumerate(folders):
 	plt.title("Pos test losses")
 	plt.legend()
 
-	'''
+	# '''
 	plt.figure(4)
 	plt.plot(test_stress_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
 	plt.plot(test_stress_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
-	plt.ylabel("Error [log Pa]")
+	plt.ylabel("Error [Pa]")
 	if baseline_stress_mean_error and baseline_stress_final_error:
 		plt.plot([baseline_stress_mean_error] * len(test_stress_mean_errors), color='gray')
 		plt.plot([baseline_stress_final_error] * len(test_stress_final_errors), '--', color='gray')
 	plt.title("Stress test losses")
 	plt.legend()
-	'''
+	# '''
 
 plt.show()

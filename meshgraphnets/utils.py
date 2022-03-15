@@ -1,15 +1,29 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+import os
+import trimesh
+
+
+def get_output_size(FLAGS):
+	if predict_some_stress_only(FLAGS):
+		return 1 
+	else:
+		return 4 # velocity and stress
+
+def check_consistencies(FLAGS):
+	if FLAGS.predict_stress_change_only:
+		assert(FLAGS.gripper_force_action_input)
 
 
 def predict_some_stress_only(FLAGS):
-	if FLAGS.predict_log_stress_t_only or FLAGS.predict_log_stress_t1_only or FLAGS.predict_log_stress_change_only:
+	if FLAGS.predict_log_stress_t_only or FLAGS.predict_log_stress_t1_only or FLAGS.predict_log_stress_change_only or FLAGS.predict_stress_change_only or FLAGS.predict_stress_t_only:
+		assert(not FLAGS.predict_pos_change_only)
 		return True
 	return False
 
 
 def stress_t_as_node_feature(FLAGS):
-	if FLAGS.predict_log_stress_t_only or FLAGS.predict_pos_change_only:
+	if FLAGS.predict_log_stress_t_only or FLAGS.predict_pos_change_only or FLAGS.predict_stress_t_only:
 		return False
 	return True
 
@@ -80,3 +94,45 @@ def rigid_body_motion(P, Q):
     axis_angle = Rot_scipy.as_rotvec()
 
     return axis_angle, np.asarray(t)[0]
+
+
+def open_gripper_at_pose(tfn):
+  ''' Using numpy instead of tf operations.'''
+
+  # Load original finger positions
+  finger1_path = os.path.join('meshgraphnets', 'assets', 'finger1_face_uniform' + '.stl')
+  f1_trimesh = trimesh.load_mesh(finger1_path)
+  f1_verts_original = f1_trimesh.vertices
+
+  finger2_path = os.path.join('meshgraphnets', 'assets', 'finger2_face_uniform' + '.stl')
+  f2_trimesh = trimesh.load_mesh(finger2_path)
+  f2_verts_original = f2_trimesh.vertices
+  f_pc_original = np.concatenate((f1_verts_original, f2_verts_original), axis=0)
+
+
+
+  # Load transformation params (euler and translation)
+  euler, trans = np.split(np.squeeze(tfn), 2, axis=0)
+
+
+  tf_from_euler = R.from_euler('xyz', euler)
+  f_pc = tf_from_euler.apply(f_pc_original) + trans
+  original_normal = np.array([1, 0, 0])
+  gripper_normal = tf_from_euler.apply(original_normal)
+  f1_verts, f2_verts = np.split(f_pc, 2, axis=0)
+
+
+  # tf_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(euler)
+  # f_pc = tfg_transformation.rotation_matrix_3d.rotate(f_pc_original, tf_from_euler) + trans
+  # original_normal = tf.constant([1., 0., 0.], dtype=tf.float32)
+  # gripper_normal = tfg_transformation.rotation_matrix_3d.rotate(original_normal, tf_from_euler)
+  # f1_verts, f2_verts = tf.split(f_pc, 2, axis=0)
+
+  return f1_verts, f2_verts, gripper_normal
+
+def f_verts_at_pos(tfn, gripper_pos):
+  f1_verts, f2_verts, gripper_normal = open_gripper_at_pose(tfn)
+  f1_verts_closed = f1_verts -  gripper_normal * (0.04 - gripper_pos)
+  f2_verts_closed = f2_verts + gripper_normal * (0.04 - gripper_pos)
+  f_verts = np.concatenate((f1_verts_closed, f2_verts_closed), axis=0)
+  return f_verts

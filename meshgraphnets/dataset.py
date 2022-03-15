@@ -104,14 +104,24 @@ def load_dataset(path, split, num_objects):
   ds = ds.prefetch(1)
   return ds
 
-def add_targets(ds, fields, add_history):
+def add_targets(ds, FLAGS, fields, add_history):
   """Adds target and optionally history fields to dataframe."""
   def fn(trajectory):
     out = {}
     for key, val in trajectory.items():
+      
       if "stress" in key:
         val = tf.nn.relu(val)
+
+      '''
+      if FLAGS.gripper_force_action_input and key in ["gripper_pos", "world_pos"]:
+        val_len = tf.shape(val)[0]
+        first_elem = tf.expand_dims(val[0], axis=0)
+        val = tf.tile(first_elem, [val_len, 1, 1])
+      '''
+
       out[key] = val[1:-1]
+      
       if not add_history:
         out[key] = val[1:-1] # either [:-1] for full traj or [1:-1]
       if key in fields:

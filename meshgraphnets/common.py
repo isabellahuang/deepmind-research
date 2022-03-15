@@ -36,7 +36,14 @@ class NodeType(enum.IntEnum):
 
 
 def sr_mesh_edges(mesh_edges):
-  senders, receivers = tf.unstack(mesh_edges, axis=1)
+  all_senders, all_receivers = tf.unstack(mesh_edges, axis=1)
+
+  # Remove non-unique edges
+  difference = tf.math.subtract(all_senders, all_receivers)
+  unique_edge_idxs = tf.where(tf.not_equal(difference, 0))
+  unique_mesh_edges = tf.gather(mesh_edges, unique_edge_idxs[:,0], axis=0)
+  senders, receivers = tf.unstack(unique_mesh_edges, 2, axis=1)
+
   return (tf.concat([senders, receivers], axis=0),
           tf.concat([receivers, senders], axis=0))
 

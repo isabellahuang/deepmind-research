@@ -147,6 +147,8 @@ def main(unused_argv):
 
 
     pos = np.copy(rollout_data[traj]['pred_pos'][step])
+
+
     stress = np.copy(rollout_data[traj]['pred_stress'][step])
 
     gt_pos = np.copy(rollout_data[traj]['gt_pos'][step])
@@ -159,17 +161,18 @@ def main(unused_argv):
 
 
 
-    # print(step, np.min(stress), np.max(stress), np.max(gt_stress))
 
 
     # Convert back to real stress
-    # '''
+    '''
     positive_idx = np.argwhere(stress > 0)
     stress[positive_idx] = np.exp(stress[positive_idx]) - 1
     gt_positive_idx = np.argwhere(gt_stress > 0)
     gt_stress[gt_positive_idx] = np.exp(gt_stress[gt_positive_idx]) - 1
-    # '''
+    '''
 
+
+    print("===", step, np.min(stress), np.max(stress), np.max(gt_stress))
 
     faces = rollout_data[traj]['faces'][step]
 
@@ -188,18 +191,39 @@ def main(unused_argv):
     pred_final_pos = np.copy(rollout_data[traj]['pred_pos'][-1])
     pos_error = np.copy(rollout_data[traj]['pos_error'])
     baseline_pos_error = np.copy(rollout_data[traj]['baseline_pos_error'])
-    print(gt_final_pos.shape, pred_final_pos.shape)
     mse = np.square(gt_final_pos - pred_final_pos).mean()
-    print("MSE", mse)
-    print("Sum  gt final pos", np.sum(gt_final_pos))
-    print("Sum  pred final pos", np.sum(pred_final_pos))
-    # print(pos_error)
+
 
     all_gt_pos = np.copy(rollout_data[traj]['gt_pos'])
     all_pred_pos = np.copy(rollout_data[traj]['pred_pos'])
     our_pos_error = np.mean(np.sum(np.square(all_gt_pos - all_pred_pos), axis=-1), axis=-1)
 
-    print(np.mean(np.sqrt(our_pos_error)))
+
+    ### Why do stress losses not match
+    '''
+    rollout_losses = np.copy(rollout_data[traj]['rollout_losses'])
+    print("Rollout losses")
+    print(rollout_losses)
+    print("Stress error")
+    stress_error = np.copy(rollout_data[traj]['stress_error'])
+    print(stress_error)
+    print("Our stress error")
+    all_gt_stress = np.copy(rollout_data[traj]['gt_stress'])
+    all_pred_stress = np.copy(rollout_data[traj]['pred_stress'])
+    our_stress_error = np.mean(np.sum(np.square(all_gt_stress - all_pred_stress), axis=-1), axis=-1)
+    our_stress_error = np.mean(np.sum(np.square(all_gt_stress[:,1180:,:] - all_pred_stress[:,1180:,:]), axis=-1), axis=-1)
+
+    print(our_stress_error)
+
+
+    print("First rollout_loss")
+    print(rollout_losses[0])
+    print(rollout_losses.shape)
+    print(all_pred_stress[0])
+    print(all_pred_stress.shape)
+    quit()
+    '''
+    ####
 
 
 
@@ -250,9 +274,9 @@ def main(unused_argv):
 
     # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=pd_stress[:])
     X, Y, Z  = pos[:, 0], pos[:, 1], pos[:, 2]
-    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=pd_stress[:])
+    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:])
 
-    print(node_type.shape)
+
     # Plot mesh edges
     # for p, q in zip(mesh_senders, mesh_receivers):
       # ax.plot([X[p], X[q]], [Y[p], Y[q]], [Z[p], Z[q]], 'ro-')
@@ -298,17 +322,18 @@ def main(unused_argv):
     ####### Final stress comparison
     gt_final_pd_stress = np.copy(trajectory['gt_pd_stress'][-1])
     ### Maybe final stress is different when calculated
-    gt_final_pd_stress = tet_object.get_pd_vertex_stresses(gt_final_pos)
+    #gt_final_pd_stress = tet_object.get_pd_vertex_stresses(gt_final_pos)
 
     gt_final_pd_stresses.append(gt_final_pd_stress)
     final_pd_stress = tet_object.get_pd_vertex_stresses(final_pos)
     final_pd_stresses.append(final_pd_stress)
     final_stress = np.copy(trajectory['pred_stress'][-1])
+
     # Convert back to real stress
-    # '''
+    '''
     positive_idx = np.argwhere(final_stress > 0)
     final_stress[positive_idx] = np.exp(final_stress[positive_idx]) - 1
-    # '''
+    '''
     final_stresses.append(final_stress)
 
     ###### Final deformation comparison
@@ -344,6 +369,7 @@ def main(unused_argv):
 
 
   gt_final_pd_stresses_means = [np.mean(k) for k in gt_final_pd_stresses]
+
   final_pd_stresses_means = [np.mean(k) for k in final_pd_stresses]
   gt_final_pd_stresses_maxes = [np.max(k) for k in gt_final_pd_stresses]
   final_pd_stresses_maxes = [np.max(k) for k in final_pd_stresses]

@@ -24,6 +24,8 @@ import tensorflow.compat.v1 as tf
 EdgeSet = collections.namedtuple('EdgeSet', ['name', 'features', 'senders',
                                              'receivers'])
 MultiGraph = collections.namedtuple('Graph', ['node_features', 'edge_sets'])
+from meshgraphnets import deforming_plate_model
+from meshgraphnets import common
 
 
 class GraphNetBlock(snt.AbstractModule):
@@ -88,7 +90,7 @@ class EncodeProcessDecode(snt.AbstractModule):
     self._num_layers = num_layers
     self._message_passing_steps = message_passing_steps
 
-  def _make_mlp(self, output_size, layer_norm=True):
+  def _make_mlp(self, output_size, layer_norm=False): ## For gradient debugging, set layer_norm=False. It's typically = True
     """Builds an MLP."""
     widths = [self._latent_size] * self._num_layers + [output_size]
     network = snt.nets.MLP(widths, activate_final=False)
@@ -119,4 +121,48 @@ class EncodeProcessDecode(snt.AbstractModule):
     for _ in range(self._message_passing_steps):
       latent_graph = GraphNetBlock(model_fn)(latent_graph)
     return self._decoder(latent_graph) # returns per-node output
-    # return "Hello"
+
+class SimplifiedNetwork(snt.AbstractModule):
+
+  def __init__(self,
+               name='SimplifiedNetwork'):
+    super(SimplifiedNetwork, self).__init__(name=name)
+    self._latent_size = 2
+    self._num_layers = 10
+
+  def _make_mlp(self, output_size, layer_norm=False):
+    """Builds an MLP."""
+    # network = snt.nets.MLP([8, 16, 32, 8, 1], activate_final=False) # Used when input was just grippe rpos, force, and tfn
+    network = snt.nets.MLP([2000, 500, 30, 1], activate_final=False)
+    if layer_norm:
+      network = snt.Sequential([network, snt.LayerNorm()])
+    return network
+    # self.hidden1 = snt.Linear(8)
+    # self.hidden2 = snt.Linear(16)
+    # self.hidden3 = snt.Linear(32)
+    # self.hidden4
+
+
+  def _build(self, inputs):
+    simplified_mlp = self._make_mlp(1)
+    f_verts, _, _, _ = deforming_plate_model.gripper_world_pos(inputs)
+    f_verts_flattened = tf.reshape(f_verts, [-1, 1])
+
+    num_f_verts_total = 1180# tf.shape(f_verts)[0]
+    num_verts_total = tf.shape(inputs['mesh_pos'])[0]
+    pad_diff = num_verts_total - num_f_verts_total
+    paddings = [[0, pad_diff], [0, 0]]
+    finger_world_pos = tf.pad(f_verts, paddings, "CONSTANT")
+    actuator_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
+    world_pos = tf.where(actuator_mask, finger_world_pos, inputs['world_pos']) # This should be equal to inputs['world_pos'] anyway
+    world_pos_flattened = tf.reshape(world_pos, [-1, 1])
+
+
+    # mlp_inputs = tf.transpose(tf.concat([inputs['gripper_pos'], inputs['force'], inputs['tfn']], axis=0))
+    # mlp_inputs = tf.ensure_shape(mlp_inputs, [1, 1 + 1 + 6])
+
+
+    mlp_inputs = tf.transpose(tf.concat([inputs['force'], world_pos_flattened], axis=0))
+    mlp_inputs = tf.ensure_shape(mlp_inputs, [1, 1 + 2292*3])
+
+    return simplified_mlp(mlp_inputs)

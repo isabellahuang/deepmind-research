@@ -72,10 +72,11 @@ flags.DEFINE_bool('noise_on_adjacent_step', True, 'Add perturbation to both t an
 flags.DEFINE_bool('gripper_force_action_input', True, 'Change in gripper force as action input')
 
 
-flags.DEFINE_bool('log_stress_t', True, 'Take the log of stress at time t as feature')
+flags.DEFINE_bool('log_stress_t', False, 'Take the log of stress at time t as feature')
 
 flags.DEFINE_bool('force_label_node', False, 'Whether each node should be labeled with a force-related signal. If False, mesh edges are labeled instead')
 flags.DEFINE_bool('node_total_force_t', False, 'Whether each node should be labeled with the total gripper force')
+# The default is currently labelling mesh edges with normalized force over nodes in contact
 flags.DEFINE_bool('compute_world_edges', False, 'Whether to compute world edges')
 
 
@@ -90,6 +91,12 @@ flags.DEFINE_bool('predict_log_stress_t_only', False, 'Do not make deformation p
 flags.DEFINE_bool('predict_log_stress_t1_only', False, 'Do not make deformation predictions. Only predict stress at time t1')
 flags.DEFINE_bool('predict_log_stress_change_only', False, 'Do not make deformation predictions. Only predict stress at time t1')
 flags.DEFINE_bool('predict_pos_change_only', False, 'Do not make stress predictions. Only predict change in pos between time t and t1')
+
+flags.DEFINE_bool('predict_stress_change_only', False, 'Do not make pos predictions. Only predict change in raw stress between time t and t1')
+flags.DEFINE_bool('predict_stress_t_only', False, 'Do not make pos predictions. Only predict raw stress at time t')
+
+flags.DEFINE_bool('simplified_predict_stress_change_only', False, 'Simplified network for predicting stress only. No worries about position')
+
 
 flags.DEFINE_bool('aux_mesh_edge_distance_change', False, 'Add auxiliary loss term: mesh edge distances')
 flags.DEFINE_bool('use_pd_stress', True, 'Use pd_stress rather than stress for inputs["stress"]')
@@ -158,7 +165,7 @@ def classification_accuracy_threshold(predicted, actual, percentile):
 
 def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=100):
   # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
-  ds = dataset.add_targets(ds, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
+  ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
   
   test = not n_horizon
   if test:
@@ -227,7 +234,7 @@ def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=10
     ds = ds.map(add_noise, num_parallel_calls=8)
 
 
-  # ds = ds.shuffle(100)
+  ds = ds.shuffle(500)
   return ds
 
 
@@ -272,7 +279,7 @@ def learner(model, params):
 
 
   loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
-  test_loss_op, test_traj_op, test_scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory.
+  test_loss_op, test_traj_op, test_scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
 
   debug_op = model.print_debug(inputs)
 
@@ -284,11 +291,7 @@ def learner(model, params):
   train_op = optimizer.minimize(loss_op, global_step=global_step) # Passing in global step increments it every time a batch finishes
 
   # Don't train for the first few steps, just accumulate normalization stats. Where does this happen? 
-  # accumulate_op = model.loss(inputs, accumulate=True, normalize=True)
   accumulate_op, _ , _ = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=1, normalize=True, accumulate=True)
-  # train_op = tf.cond(tf.less(global_step, 100),
-  #                    lambda: tf.group(tf.assign_add(global_step, 1)), # If global step < 1000
-  #                    lambda: tf.group(train_op)) # If global step > 1000
 
   losses = []
   lowest_val_errors = [sys.maxsize]
@@ -326,7 +329,7 @@ def learner(model, params):
     try:
       while True:
         _, a = sess.run([accumulate_op, debug_op]) 
-        print(np.unique(a[0]))
+        print(a)
         print("---")
         num_train_dp += 1
 
@@ -334,11 +337,10 @@ def learner(model, params):
       print("Accumulated stats. Total number of train points:", num_train_dp)
       pass
     # '''
+
+
     step = 0
     for i in range(FLAGS.num_epochs):
-
-
-
       ##########
       sess.run(train_init_op)
       train_losses = []
@@ -346,23 +348,11 @@ def learner(model, params):
       try:
         train_counter = 0
         while True:
-          # print(train_counter, "Training")
-          # train_counter += 1
-          # _, step, train_loss, a, traj_opt_data, scalar_op_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op, scalar_op]) 
           _, step, train_loss, a, traj_opt_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op]) 
 
-          # _, step = sess.run([train_op, global_step])
-          # train_loss, a = sess.run([loss_op, debug_op])
-          ## Note to self: look at gradients
-          # loss, traj_data = sess.run([scalar_op, traj_ops])
-          # final_error = sess.run([scalar_op])
-          # print(final_error)
-          # print("Train", step, traj_opt_data['avg_gt_stress'], traj_opt_data['avg_pred_stress'])
-          # print(scalar_op_data['error'])
-
           train_losses.append(train_loss)
+          # print("debug", a)/
 
-          # print("training", step, a)
           if step % 1000 == 0:
             logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
 
@@ -398,7 +388,6 @@ def learner(model, params):
             baseline_stress_final_errors.append(test_scalar_data['baseline_stress_final_error'])
 
 
-
         except tf.errors.OutOfRangeError:
           pass
 
@@ -414,14 +403,15 @@ def learner(model, params):
         ######################
 
 
-
       # Record losses in text file
       logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
+
       if FLAGS.checkpoint_dir:
         file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
         log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
           np.mean(test_pos_final_errors), np.mean(baseline_pos_mean_errors), np.mean(baseline_pos_final_errors), \
           np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors))
+
         file.write(log_line)
         file.close()
 
@@ -460,18 +450,24 @@ def evaluator(model, params):
   for ot, obj_file in enumerate(test_objects):
     print("===", obj_file, ot, "of", len(test_files))
     ds = dataset.load_dataset(FLAGS.dataset_dir, [obj_file], FLAGS.num_objects)
-    ds = dataset.add_targets(ds, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
+    ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
     inputs = tf.data.make_one_shot_iterator(ds).get_next()
-    _, traj_ops, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS)
+    loss_val_temp, traj_ops, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
 
+
+    # force = tf.placeholder(tf.float32)
+    # loss_val_temp2, traj_ops2, scalar_op2 = params['evaluator'].evaluate(model, inputs, FLAGS) # For refinement?
 
     # Try to get gradients
-    pred_stress_output = traj_ops['pred_stress']
-    # grad_op = tf.gradients(pred_stress_output, inputs['world_pos'])
-    # grad_op = tf.gradients(scalar_op['actual_final_stress'], inputs['stress'], unconnected_gradients='zero') # This one for gradients
+    grad_op = tf.gradients(traj_ops['mean_pred_stress'], traj_ops['tfn'])#, stop_gradients=[traj_ops['tfn'][:3], traj_ops['world_edges']])
+    traj_ops2 = params['evaluator'].refine_inputs(model, inputs, FLAGS, grad_op, tf.constant(1e-10, dtype=tf.float32))
 
-    grad_op = tf.gradients(scalar_op['pred_final_pos'], inputs['mesh_pos'])
+    cc_range = np.linspace(-1e-10, 1e-10, 11) # for approximate gradient
 
+
+    traj_ops2_multiple = [params['evaluator'].refine_inputs(model, inputs, FLAGS, grad_op, tf.constant(cc, dtype=tf.float32)) for cc in cc_range]
+    foo = [params['evaluator'].evaluate(model, inputs, FLAGS, eval_step=cc) for cc in range(0, 48, 5)]
+    traj_ops_multiple = [f[1] for f in foo]
 
     try:
       tf.train.create_global_step()
@@ -488,6 +484,11 @@ def evaluator(model, params):
 
 
       traj_idx = 0
+
+      # writer = tf.summary.FileWriter("output", sess.graph)
+
+
+
       # Sort predicted and final stresses
       actual_final_stresses = dict()
       pred_final_stresses = dict()
@@ -500,22 +501,118 @@ def evaluator(model, params):
         actual_final_deformations[k], pred_final_deformations[k] = [], []
         
 
+      num_decrease, num_increase = 0, 0
       try:
-        while True:
-        # for traj_idx in range(10):
+        # while True:
+        for traj_idx in range(48):
+
+          if traj_idx < 43:
+            traj_data = sess.run(traj_ops)
+            # print(traj_data['gripper_pos_all'])
+            continue
+
+
           logging.info('Rollout trajectory %d', traj_idx)
           traj_idx += 1
 
-          scalar_data, traj_data = sess.run([scalar_op, traj_ops])
-          # scalar_data, traj_data, grad_data = sess.run([scalar_op, traj_ops, grad_op])
 
-          '''
-          grad_data = sess.run([grad_op])
-          print(grad_data)
-          print(type(grad_data[0][0]))
-          print(grad_data[0][0].shape)
-          quit()
-          '''
+          # scalar_data, traj_data = sess.run([scalar_op, traj_ops])
+          # scalar_data, traj_data, grad_data = sess.run([scalar_op, traj_ops, grad_op])
+          # scalar_data, traj_data, grad_data, traj_data2 = sess.run([scalar_op, traj_ops, grad_op, traj_ops2])
+          grad_data, traj_data2_group = sess.run([grad_op, traj_ops2_multiple])
+          # traj_data_group = sess.run(traj_ops_multiple)
+
+          # '''
+          # writer.close()
+          ''
+
+          # Print grad
+          # print("original tfn\n", traj_data['tfn'])
+          # print(grad_data)
+          # print("refined tfn\n", traj_data2['refined_tfn'])
+          # print(traj_data['inputs']['gripper_pos'])
+          # print(grad_data)
+          # quit()
+          # continue
+
+          # print("Og gripperp os")
+          # print(traj_data2['og_gripper_pos'])
+          # print(traj_data['gripper_pos'])
+          # print("Grad data")
+          # print(traj_data2['grad_data'])
+          # print("Constant")
+          # print(traj_data2['constant'])
+          # print("Refined gripper pos")
+          # print(traj_data2['refined_tfn'])
+
+          # import matplotlib.pyplot as plt
+          # training = [5.811185, 122.613304, 303.02414, 496.1153, 688.7827, 887.1828, 1079.305, 1274.746, 1467.6509, 1627.7112]
+          # gp = [0.01889196, 0.018531725, 0.018031925, 0.017510846, 0.016992375, 0.016460568, 0.015929282, 0.01540412, 0.014869615, 0.014420912]
+          # perturb = [716.0517, 708.79803, 704.4782, 695.7274, 688.7843, 685.0667, 680.46497, 675.292, 668.7712, 664.2909]
+
+          # plt.scatter(gp, training)
+          # plt.scatter(gp, perturb)
+          # plt.show()
+
+          # quit()
+
+
+          # print(traj_data['inside_grad'])
+          # print("Original and final stress")
+          # print(traj_data['gripper_pos'])
+          # print("Mean pred stress", traj_data['mean_pred_stress'])
+          # print(traj_data2['refined_tfn'])
+          # print(traj_data2['og_gripper_pos'])
+          # print(traj_data2['mean_pred_stress'])
+          # print("The grad")
+          # print(traj_data2['grad'])
+          # print(traj_data2['grad_data'])
+          # continue
+          
+
+
+
+          # Plot cost landscape
+          # '''
+          resulting_mean_pred_stresses = [k['mean_pred_stress'] for k in traj_data2_group]
+          print(cc_range)
+          print(resulting_mean_pred_stresses)
+          numerical_grad = (resulting_mean_pred_stresses[-1] - resulting_mean_pred_stresses[0]) / (np.max(cc_range) - np.min(cc_range))
+          print("tf gradient", grad_data)
+          print("numerical gradient", numerical_grad)
+          import matplotlib.pyplot as plt 
+          plt.plot(cc_range, resulting_mean_pred_stresses, 'o-')
+          plt.show(block=False)
+          continue
+          # '''
+
+
+
+
+          print("----- Stress before and after refinement")
+          print(traj_data['mean_pred_stress'], traj_data2['mean_pred_stress'])
+          if traj_data2['mean_pred_stress'] > traj_data['mean_pred_stress']:
+            num_increase += 1
+          else:
+            num_decrease += 1
+
+          # Plot
+          # f_verts = utils.f_verts_at_pos(traj_data['tfn'], traj_data['gripper_pos'])
+          # f_verts_refined = utils.f_verts_at_pos(traj_data2['refined_tfn'], traj_data['gripper_pos'])
+          # mesh_only_pos = traj_data['world_pos'][1180:,:]
+          # import matplotlib.pyplot as plt 
+          # fig = plt.figure(figsize=(8, 8))
+          # ax = fig.add_subplot(111, projection='3d')
+          # X, Y, Z = mesh_only_pos.T
+          # fx, fy, fz = f_verts.T
+          # frx, fry, frz = f_verts_refined.T
+          # ax.scatter(X, Y, Z)
+          # ax.scatter(fx, fy, fz)
+          # ax.scatter(frx, fry, frz)
+          # plt.show()
+
+
+          continue
 
           trajectories.append(traj_data)
           scalars.append(scalar_data)
@@ -539,10 +636,10 @@ def evaluator(model, params):
           pred_final_deformations['max'].append(max_p)
           pred_final_deformations['median'].append(median_p)
 
-          print("Final error", scalar_data['pos_final_error'])
-          print("Baseline final error", scalar_data['baseline_pos_final_error'])
-          print("Sum of gt final pos", np.sum(traj_data['gt_pos'][-1]))
-          print("Sum of pred final pos", np.sum(traj_data['pred_pos'][-1]))
+          print("Final error", scalar_data['stress_error'][-1], scalar_data['rollout_losses'][-1])
+          #print("Baseline final error", scalar_data['baseline_pos_final_error'])
+          #print("Sum of gt final pos", np.sum(traj_data['gt_pos'][-1]))
+          #print("Sum of pred final pos", np.sum(traj_data['pred_pos'][-1]))
           # quit()
 
 
@@ -551,7 +648,14 @@ def evaluator(model, params):
       except tf.errors.OutOfRangeError:
         pass
 
+      plt.show()
 
+      num_total = num_increase + num_decrease
+
+      print("Num increase", num_increase, num_increase/num_total)
+      print("Num decrease", num_decrease, num_decrease/num_total)
+      print("Total", num_total)
+      quit()
       ################
       '''
       import matplotlib.pyplot as plt
@@ -621,6 +725,8 @@ def main(argv):
   tf.disable_eager_execution()
 
   global LEN_TRAJ
+  utils.check_consistencies(FLAGS)
+
   if utils.using_dm_dataset(FLAGS):
     LEN_TRAJ = 400 - 2
   else:
@@ -629,13 +735,26 @@ def main(argv):
 
   params = PARAMETERS[FLAGS.model]
 
-  output_size = params['size']
+  # Write flags to file
+  
+  if FLAGS.checkpoint_dir:
+    flags_file = os.path.join(FLAGS.checkpoint_dir, 'flags.txt')
+    os.makedirs(FLAGS.checkpoint_dir, exist_ok=True)
+    FLAGS.append_flags_into_file(flags_file)
+  
+
+
+  output_size = utils.get_output_size(FLAGS)
+
+  # learned_model = core_model.SimplifiedNetwork() # for mlp
 
   learned_model = core_model.EncodeProcessDecode(
       output_size=output_size,
       latent_size=FLAGS.latent_size,
       num_layers=FLAGS.num_layers,
       message_passing_steps=FLAGS.message_passing_steps)
+
+
   model = params['model'].Model(learned_model, FLAGS)
 
   if FLAGS.mode == 'train':
