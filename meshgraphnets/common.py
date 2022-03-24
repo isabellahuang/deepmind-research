@@ -15,9 +15,19 @@
 # limitations under the License.
 # ============================================================================
 """Commonly used data structures and functions."""
+import os
 
 import enum
-import tensorflow.compat.v1 as tf
+# import tensorflow.compat.v1 as tf
+import tensorflow as tf
+
+from tfdeterminism import patch
+# patch()
+SEED = 55
+os.environ['PYTHONHASHSEED'] = str(SEED)
+tf.random.set_seed(SEED)
+
+
 import sys
 
 from meshgraphnets import utils
@@ -93,18 +103,25 @@ def triangles_to_edges(faces):
           tf.concat([receivers, senders], axis=0))
 
 def squared_dist(A, B):
+
   row_norms_A = tf.reduce_sum(tf.square(A), axis=1)
   row_norms_A = tf.reshape(row_norms_A, [-1, 1])  # Column vector.
 
   row_norms_B = tf.reduce_sum(tf.square(B), axis=1)
   row_norms_B = tf.reshape(row_norms_B, [1, -1])  # Row vector.
 
-  return row_norms_A - 2 * tf.matmul(A, tf.transpose(B)) + row_norms_B
+
+
+  return row_norms_A - 2 * tf.matmul(A, B, False, True) + row_norms_B
+
+
+
 
 def squared_dist_point(point, others, thresh):
     dists = tf.reduce_sum(tf.square(point - others), axis=1)
     sq_thresh = thresh ** 2
     return tf.where(tf.math.less(dists, sq_thresh))
+
 
 def construct_world_edges(world_pos, node_type, FLAGS):
 
@@ -112,6 +129,9 @@ def construct_world_edges(world_pos, node_type, FLAGS):
   actuator_idx = tf.where(tf.equal(node_type[:, 0], NodeType.OBSTACLE))
   B = tf.squeeze(tf.gather(world_pos, deformable_idx))
   A = tf.squeeze(tf.gather(world_pos, actuator_idx))
+
+  A = tf.cast(A, tf.float64)
+  B = tf.cast(B, tf.float64)
 
   thresh = 0.005
 
@@ -121,11 +141,17 @@ def construct_world_edges(world_pos, node_type, FLAGS):
   # ''' Tried and true
   dists = squared_dist(A, B)
 
+  # Compare to cdist
+
   rel_close_pair_idx = tf.where(tf.math.less(dists, thresh ** 2))
+
+
   close_pair_actuator = tf.gather(actuator_idx, rel_close_pair_idx[:,0])
   close_pair_def = tf.gather(deformable_idx, rel_close_pair_idx[:,1])
   close_pair_idx = tf.concat([close_pair_actuator, close_pair_def], 1)
+
   senders, receivers = tf.unstack(close_pair_idx, 2, axis=1)
+
 
   return (tf.concat([senders, receivers], axis=0),
           tf.concat([receivers, senders], axis=0))

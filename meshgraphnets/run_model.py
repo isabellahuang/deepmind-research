@@ -15,16 +15,30 @@
 # limitations under the License.
 # ============================================================================
 """Runs the learner/evaluator."""
+
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+import pickle
 import sys
 
-import pickle
+import sonnet as snt
 from absl import app
 from absl import flags
 from absl import logging
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
+
+
+# Try to run with more gpu usage in TF 2
+devices = tf.config.list_physical_devices('GPU')
+tf.config.experimental.set_memory_growth(devices[0], True)
+
+
+from tfdeterminism import patch
+SEED = 55
+os.environ['PYTHONHASHSEED'] = str(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
 
 from meshgraphnets import common
 from meshgraphnets import cfd_eval
@@ -36,7 +50,6 @@ from meshgraphnets import deforming_plate_eval
 from meshgraphnets import core_model
 from meshgraphnets import dataset
 from meshgraphnets import utils
-
 
 
 
@@ -78,6 +91,7 @@ flags.DEFINE_bool('force_label_node', False, 'Whether each node should be labele
 flags.DEFINE_bool('node_total_force_t', False, 'Whether each node should be labeled with the total gripper force')
 # The default is currently labelling mesh edges with normalized force over nodes in contact
 flags.DEFINE_bool('compute_world_edges', False, 'Whether to compute world edges')
+flags.DEFINE_bool('use_cpu', False, 'Use CPU rather than GPU')
 
 
 # Exactly one of these must be set to True
@@ -107,7 +121,6 @@ flags.DEFINE_integer('n_horizon', 1, 'No. of steps in training horizon')
 
 
 
-
 PARAMETERS = {
     'cfd': dict(noise=0.02, gamma=1.0, field='velocity', history=False,
                 size=2, batch=2, model=cfd_model, evaluator=cfd_eval),
@@ -120,45 +133,8 @@ PARAMETERS = {
 LEN_TRAJ = 0 
 
 
-def classification_accuracy_ranking(predicted, actual, percentile):
-  actual_threshold = np.percentile(actual, percentile)
-  pred_threshold = np.percentile(predicted, percentile)
-  num_g = len(predicted)
-  assert(num_g == len(actual))
 
-  actual_top = [k for k in range(num_g) if actual[k] >= actual_threshold]
-  actual_bottom = [k for k in range(num_g) if actual[k] < actual_threshold]
 
-  predicted_top = [k for k in range(num_g) if predicted[k] >= pred_threshold]
-  predicted_bottom = [k for k in range(num_g) if predicted[k] < pred_threshold]
-
-  predicted_bottom_correct = [k for k in predicted_bottom if k in actual_bottom]
-  predicted_top_correct = [k for k in predicted_top if k in actual_top]
-
-  # print("Actual", np.min(actual), threshold, np.max(actual))
-  # print("Predicted", np.min(predicted), threshold, np.max(predicted))
-
-  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
-
-def classification_accuracy_threshold(predicted, actual, percentile):
-
-  threshold = np.percentile(actual, percentile)
-  num_g = len(predicted)
-  assert(num_g == len(actual))
-
-  actual_top = [k for k in range(num_g) if actual[k] >= threshold]
-  actual_bottom = [k for k in range(num_g) if actual[k] < threshold]
-
-  predicted_top = [k for k in range(num_g) if predicted[k] >= threshold]
-  predicted_bottom = [k for k in range(num_g) if predicted[k] < threshold]
-
-  predicted_bottom_correct = [k for k in predicted_bottom if k in actual_bottom]
-  predicted_top_correct = [k for k in predicted_top if k in actual_top]
-
-  # print("Actual", np.min(actual), threshold, np.max(actual))
-  # print("Predicted", np.min(predicted), threshold, np.max(predicted))
-
-  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
 
 
 
@@ -231,7 +207,7 @@ def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=10
     ds =  ds.flat_map(repeat_and_shift)
 
     # Add noise
-    ds = ds.map(add_noise, num_parallel_calls=8)
+    ds = ds.map(add_noise, num_parallel_calls=1) #Used to be 8
 
 
   ds = ds.shuffle(500)
@@ -255,10 +231,14 @@ def evaluator_file_split():
 
 def learner(model, params):
   """Run a learner job."""
-  global_step = tf.train.create_global_step()
+
+  # Set up tensorboard writer
+  import datetime
+  current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+  train_log_dir = FLAGS.checkpoint_dir
+  # train_summary_writer = tf.summary.create_file_writer(train_log_dir)
 
   n_horizon = FLAGS.n_horizon
-
   train_files, test_files = evaluator_file_split()
 
 
@@ -269,155 +249,156 @@ def learner(model, params):
   train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, n_training_trajectories=FLAGS.num_training_trajectories)
   single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, n_training_trajectories=FLAGS.num_training_trajectories)
   test_ds = get_flattened_dataset(test_ds, params)
-  iterator = tf.data.Iterator.from_structure(train_ds.output_types, train_ds.output_shapes)
-
-  inputs = iterator.get_next()
-
-  single_train_init_op = iterator.make_initializer(single_train_ds)
-  train_init_op = iterator.make_initializer(train_ds)
-  test_init_op = iterator.make_initializer(test_ds)
 
 
-  loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
-  test_loss_op, test_traj_op, test_scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
+  ##### TF 2 optimizer
+  optimizer = snt.optimizers.Adam(learning_rate=1e-4)
 
-  debug_op = model.print_debug(inputs)
+  def train_step(inputs):
+    with tf.GradientTape() as tape:
+      initial_state = {k: v[0] for k, v in inputs.items()}
+      _, _, loss_val = model(initial_state)
+      loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
 
-  lr = tf.train.exponential_decay(learning_rate=FLAGS.learning_rate, # Used to be 1e-4
-                                  global_step=global_step,
-                                  decay_steps=int(5e6),
-                                  decay_rate=0.1) + 1e-6
-  optimizer = tf.train.AdamOptimizer(learning_rate=lr)
-  train_op = optimizer.minimize(loss_op, global_step=global_step) # Passing in global step increments it every time a batch finishes
+    train_params = model.trainable_variables
+    grads = tape.gradient(loss_op, train_params)
+    optimizer.apply(grads, train_params)
 
-  # Don't train for the first few steps, just accumulate normalization stats. Where does this happen? 
-  accumulate_op, _ , _ = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=1, normalize=True, accumulate=True)
+    return loss_op
+
+
 
   losses = []
   lowest_val_errors = [sys.maxsize]
 
 
-
-  config = tf.ConfigProto()
-  config.gpu_options.allow_growth = True
-  # with tf.train.MonitoredTrainingSession(
-  #     hooks=[tf.train.StopAtStepHook(last_step=FLAGS.num_training_steps)],
-  #     config=config,
-  #     checkpoint_dir=FLAGS.checkpoint_dir,
-  #     save_checkpoint_steps=1000) as sess:
-
-
   ### Use normal saver
   num_best_models = 2
+
+  # SAVER is to be updated in TF2 
+  '''
   saver = tf.train.Saver(max_to_keep=num_best_models)
 
-  with tf.Session(config=config) as sess:
-    ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
-    if ckpt and ckpt.model_checkpoint_path:
-      print("Restoring checkpoint")
-      saver.restore(sess, ckpt.model_checkpoint_path)
-    else:
-      print("No existing checkpoint")
-      sess.run(tf.global_variables_initializer())
+
+  with tf.Session(config=config) as sess: #tf2
+
+  ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
+  if ckpt and ckpt.model_checkpoint_path:
+    print("Restoring checkpoint")
+    saver.restore(sess, ckpt.model_checkpoint_path)
+  else:
+    print("No existing checkpoint")
+    sess.run(tf.global_variables_initializer())
+  '''
+
+  # Take in all training data for normalization stats
+  iterator = iter(single_train_ds)
+
+  num_train_dp = 0
+  print("Accumulating stats without training")
+
+  try:
+    while True:
+      inputs = iterator.get_next()
+      model.accumulate_stats(inputs)
+      num_train_dp += 1
 
 
-    # Take in all training data for normalization stats
-    # '''
-    sess.run(single_train_init_op)
-    num_train_dp = 0
-    # print("Accuulating stats")
+  except tf.errors.OutOfRangeError:
+    print("Accumulated stats. Total number of train points:", num_train_dp)
+    pass
+
+
+  step = 0
+
+  tf.profiler.experimental.start(FLAGS.checkpoint_dir)
+  for i in range(FLAGS.num_epochs):
+    iterator = iter(train_ds)
+
+    train_losses = []
+
     try:
       while True:
-        _, a = sess.run([accumulate_op, debug_op]) 
-        print(a)
-        print("---")
-        num_train_dp += 1
+        with tf.profiler.experimental.Trace('train', step_num=step, _r=1):
+          inputs = iterator.get_next()
+          step += 1
+
+          train_loss = train_step(inputs)
+          train_losses.append(train_loss)
+
+        if step % 100 == 0:
+          logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
+
 
     except tf.errors.OutOfRangeError:
-      print("Accumulated stats. Total number of train points:", num_train_dp)
+      # with train_summary_writer.as_default():
+        # tf.summary.scalar('train_loss', np.mean(train_losses), step=i)
       pass
-    # '''
 
 
-    step = 0
-    for i in range(FLAGS.num_epochs):
-      ##########
-      sess.run(train_init_op)
-      train_losses = []
-      # '''
+    ################
+    if i % FLAGS.num_epochs_per_validation == 0:
+      print("Validating")
+
+      iterator = iter(test_ds)
+
+      test_losses, test_pos_mean_errors, test_pos_final_errors = [], [], []
+      test_stress_mean_errors, test_stress_final_errors = [], []
+      baseline_pos_mean_errors, baseline_pos_final_errors = [], []
+      baseline_stress_mean_errors, baseline_stress_final_errors = [], []
+
       try:
-        train_counter = 0
+        validation_counter = 0
         while True:
-          _, step, train_loss, a, traj_opt_data = sess.run([train_op, global_step, loss_op, debug_op, traj_op]) 
+          inputs = iterator.get_next()
 
-          train_losses.append(train_loss)
-          # print("debug", a)/
+          validation_counter += 1
+          test_loss, test_traj_data, test_scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
 
-          if step % 1000 == 0:
-            logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
+          test_losses.append(test_loss)
+          test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
+          test_pos_final_errors.append(test_scalar_data["pos_final_error"])
+          baseline_pos_mean_errors.append(test_scalar_data['baseline_pos_mean_error'])
+          baseline_pos_final_errors.append(test_scalar_data['baseline_pos_final_error'])
+
+          test_stress_mean_errors.append(test_scalar_data["stress_mean_error"])
+          test_stress_final_errors.append(test_scalar_data["stress_final_error"])
+          baseline_stress_mean_errors.append(test_scalar_data['baseline_stress_mean_error'])
+          baseline_stress_final_errors.append(test_scalar_data['baseline_stress_final_error'])
 
 
       except tf.errors.OutOfRangeError:
         pass
-      # '''
-
-      ################
-      if i % FLAGS.num_epochs_per_validation == 0:
-        print("Validating")
-        sess.run(test_init_op)
-        test_losses, test_pos_mean_errors, test_pos_final_errors = [], [], []
-        test_stress_mean_errors, test_stress_final_errors = [], []
-        baseline_pos_mean_errors, baseline_pos_final_errors = [], []
-        baseline_stress_mean_errors, baseline_stress_final_errors = [], []
-
-        try:
-          validation_counter = 0
-          while True:
-            # print(validation_counter, "Validating trajectory")
-            validation_counter += 1
-            test_loss, test_scalar_data, test_traj_data, a = sess.run([test_loss_op, test_scalar_op, test_traj_op, debug_op]) # used to be raw_loss_op
-            test_losses.append(test_loss)
-            test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
-            test_pos_final_errors.append(test_scalar_data["pos_final_error"])
-            baseline_pos_mean_errors.append(test_scalar_data['baseline_pos_mean_error'])
-            baseline_pos_final_errors.append(test_scalar_data['baseline_pos_final_error'])
-
-            test_stress_mean_errors.append(test_scalar_data["stress_mean_error"])
-            test_stress_final_errors.append(test_scalar_data["stress_final_error"])
-            baseline_stress_mean_errors.append(test_scalar_data['baseline_stress_mean_error'])
-            baseline_stress_final_errors.append(test_scalar_data['baseline_stress_final_error'])
 
 
-        except tf.errors.OutOfRangeError:
-          pass
+      # Save only if validation loss is good
+      if np.mean(test_losses) <= lowest_val_errors[-1]:
+        lowest_val_errors.append(np.mean(test_losses))
+        lowest_val_errors.sort()
+        lowest_val_errors = lowest_val_errors[:num_best_models]
+        print("Saving checkpoint. Lowest validation errors updated:", lowest_val_errors)
+        # if FLAGS.checkpoint_dir:
+          # Doesn't currently work with tf2
+          # saver.save(sess, os.path.join(FLAGS.checkpoint_dir, 'model'), global_step=global_step)
+
+    # Record losses in text file
+    logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
+
+    if FLAGS.checkpoint_dir:
+      file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
+      log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
+        np.mean(test_pos_final_errors), np.mean(baseline_pos_mean_errors), np.mean(baseline_pos_final_errors), \
+        np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors))
+
+      file.write(log_line)
+      file.close()
+
+  logging.info('Training complete.')
+  tf.profiler.experimental.stop()
 
 
-        # Save only if validation loss is good
-        if np.mean(test_losses) <= lowest_val_errors[-1]:
-          lowest_val_errors.append(np.mean(test_losses))
-          lowest_val_errors.sort()
-          lowest_val_errors = lowest_val_errors[:num_best_models]
-          print("Saving checkpoint. Lowest validation errors updated:", lowest_val_errors)
-          if FLAGS.checkpoint_dir:
-            saver.save(sess, os.path.join(FLAGS.checkpoint_dir, 'model'), global_step=global_step)
-        ######################
 
-
-      # Record losses in text file
-      logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
-
-      if FLAGS.checkpoint_dir:
-        file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
-        log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
-          np.mean(test_pos_final_errors), np.mean(baseline_pos_mean_errors), np.mean(baseline_pos_final_errors), \
-          np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors))
-
-        file.write(log_line)
-        file.close()
-
-    logging.info('Training complete.')
-
-
+# Not yet migrated to TF 2
 def evaluator(model, params):
   """Run a model rollout trajectory."""
   train_files, test_files = evaluator_file_split()
@@ -691,8 +672,8 @@ def evaluator(model, params):
       for ind, (metric_name, pred, actual) in enumerate(zip(metric_names, preds, actuals)):
         print("======Metric:", metric_name)
         for m_type in ['mean', 'max']:
-          num_correct, num_total = classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
-          # num_correct, num_total = classification_accuracy_ranking(pred[m_type], actual[m_type], 50)
+          num_correct, num_total = utils.classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
+          # num_correct, num_total = utils.classification_accuracy_ranking(pred[m_type], actual[m_type], 50)
 
           print(m_type, "accuracy:", num_correct / num_total, "of", num_total)
           runnings[ind][m_type][0] += num_correct
@@ -707,8 +688,8 @@ def evaluator(model, params):
   for metric_name, all_pred, all_actual in zip(metric_names, all_preds, all_actuals):
     print("======Metric:", metric_name)
     for m_type in ['mean', 'max']:
-      num_correct, num_total = classification_accuracy_threshold(all_pred[m_type], all_actual[m_type], 50)
-      # num_correct, num_total = classification_accuracy_ranking(all_pred[m_type], all_actual[m_type], 50)
+      num_correct, num_total = utils.classification_accuracy_threshold(all_pred[m_type], all_actual[m_type], 50)
+      # num_correct, num_total = utils.classification_accuracy_ranking(all_pred[m_type], all_actual[m_type], 50)
       print(m_type, "Accuracy:", num_correct / num_total, "of", num_total)
 
 
@@ -718,11 +699,26 @@ def evaluator(model, params):
   with open(FLAGS.rollout_path, 'wb') as fp:
     pickle.dump(trajectories, fp)
 
+###################3
+class MyMLP(snt.Module):
+  def __init__(self, name=None):
+    super(MyMLP, self).__init__(name=name)
+    self.hidden1 = snt.Linear(1024, name="hidden1")
+    self.output = snt.Linear(10, name="output")
+
+  def __call__(self, x):
+    x = self.hidden1(x)
+    x = tf.nn.relu(x)
+    x = self.output(x)
+    return x
+  ##########################
 
 def main(argv):
   del argv
-  tf.enable_resource_variables()
-  tf.disable_eager_execution()
+  # tf.enable_resource_variables()
+
+  # tf.disable_eager_execution()
+  tf.config.run_functions_eagerly(True)
 
   global LEN_TRAJ
   utils.check_consistencies(FLAGS)
@@ -731,6 +727,10 @@ def main(argv):
     LEN_TRAJ = 400 - 2
   else:
     LEN_TRAJ = 50 - 2
+
+  # Use CPU
+  if FLAGS.use_cpu:
+    tf.config.set_visible_devices([], 'GPU')
 
 
   params = PARAMETERS[FLAGS.model]
@@ -746,7 +746,9 @@ def main(argv):
 
   output_size = utils.get_output_size(FLAGS)
 
+
   # learned_model = core_model.SimplifiedNetwork() # for mlp
+
 
   learned_model = core_model.EncodeProcessDecode(
       output_size=output_size,
@@ -754,8 +756,14 @@ def main(argv):
       num_layers=FLAGS.num_layers,
       message_passing_steps=FLAGS.message_passing_steps)
 
+  #### For debugging
+
+  ###
+
+
 
   model = params['model'].Model(learned_model, FLAGS)
+
 
   if FLAGS.mode == 'train':
     learner(model, params)
@@ -767,4 +775,7 @@ def main(argv):
 
 
 if __name__ == '__main__':
+
+
+
   app.run(main)

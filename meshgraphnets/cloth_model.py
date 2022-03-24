@@ -24,7 +24,9 @@ from meshgraphnets import core_model
 from meshgraphnets import normalization
 
 
-class Model(snt.AbstractModule):
+# class Model(snt.AbstractModule):
+class Model(snt.Module):
+
   """Model for static cloth simulation."""
 
   def __init__(self, learned_model, name='Model'):
@@ -69,12 +71,15 @@ class Model(snt.AbstractModule):
         edge_sets=[mesh_edges])
 
   # Is this used?
-  def _build(self, inputs):
+  @tf.function
+  def __call__(self, inputs):
+  # def _build(self, inputs):
     graph = self._build_graph(inputs, is_training=False)
     per_node_network_output = self._learned_model(graph)
     return self._update(inputs, per_node_network_output)
 
-  @snt.reuse_variables
+  @tf.function
+  # @snt.reuse_variables
   def loss(self, inputs):
     """L2 loss on position."""
     graph = self._build_graph(inputs, is_training=True)

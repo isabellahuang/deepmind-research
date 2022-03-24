@@ -22,6 +22,15 @@ import os
 import trimesh
 import tensorflow.compat.v1 as tf
 
+
+from tfdeterminism import patch
+# patch()
+SEED = 55
+os.environ['PYTHONHASHSEED'] = str(SEED)
+# random.seed(SEED)
+# np.random.seed(SEED)
+tf.set_random_seed(SEED)
+
 from meshgraphnets.common import NodeType
 
 
@@ -100,7 +109,7 @@ def load_dataset(path, split, num_objects):
   print("Tfrecords_files", tfrecords_files)
   ds = tf.data.TFRecordDataset(tfrecords_files)
 
-  ds = ds.map(functools.partial(_parse, meta=meta), num_parallel_calls=8)
+  ds = ds.map(functools.partial(_parse, meta=meta), num_parallel_calls=1)
   ds = ds.prefetch(1)
   return ds
 
@@ -109,7 +118,7 @@ def add_targets(ds, FLAGS, fields, add_history):
   def fn(trajectory):
     out = {}
     for key, val in trajectory.items():
-      
+
       if "stress" in key:
         val = tf.nn.relu(val)
 
@@ -131,7 +140,7 @@ def add_targets(ds, FLAGS, fields, add_history):
         else:
           out['target|'+key] = val[2:] # Either [1:] for full traj or [2:]
     return out
-  return ds.map(fn, num_parallel_calls=8)
+  return ds.map(fn, num_parallel_calls=1)
 
 
 def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
@@ -148,7 +157,7 @@ def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
     return frame
 
   ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)
-  ds = ds.map(add_noise, num_parallel_calls=8)
+  ds = ds.map(add_noise, num_parallel_calls=1)
 
   ds = ds.repeat(num_epochs)
   ds = ds.shuffle(5000) # This is the size of the shuffle buffer
@@ -183,5 +192,5 @@ def batch_dataset(ds, batch_size):
     return out
   if batch_size > 1:
     ds = ds.window(batch_size, drop_remainder=True)
-    ds = ds.map(batch_accumulate, num_parallel_calls=8)
+    ds = ds.map(batch_accumulate, num_parallel_calls=1)
   return ds

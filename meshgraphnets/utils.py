@@ -136,3 +136,44 @@ def f_verts_at_pos(tfn, gripper_pos):
   f2_verts_closed = f2_verts + gripper_normal * (0.04 - gripper_pos)
   f_verts = np.concatenate((f1_verts_closed, f2_verts_closed), axis=0)
   return f_verts
+  
+
+
+def classification_accuracy_threshold(predicted, actual, percentile):
+
+  threshold = np.percentile(actual, percentile)
+  num_g = len(predicted)
+  assert(num_g == len(actual))
+
+  actual_top = [k for k in range(num_g) if actual[k] >= threshold]
+  actual_bottom = [k for k in range(num_g) if actual[k] < threshold]
+
+  predicted_top = [k for k in range(num_g) if predicted[k] >= threshold]
+  predicted_bottom = [k for k in range(num_g) if predicted[k] < threshold]
+
+  predicted_bottom_correct = [k for k in predicted_bottom if k in actual_bottom]
+  predicted_top_correct = [k for k in predicted_top if k in actual_top]
+
+  # print("Actual", np.min(actual), threshold, np.max(actual))
+  # print("Predicted", np.min(predicted), threshold, np.max(predicted))
+
+  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
+
+def classification_accuracy_ranking(predicted, actual, percentile):
+  actual_threshold = np.percentile(actual, percentile)
+  pred_threshold = np.percentile(predicted, percentile)
+  num_g = len(predicted)
+  assert(num_g == len(actual))
+
+  actual_top = [k for k in range(num_g) if actual[k] >= actual_threshold]
+  actual_bottom = [k for k in range(num_g) if actual[k] < actual_threshold]
+
+  predicted_top = [k for k in range(num_g) if predicted[k] >= pred_threshold]
+  predicted_bottom = [k for k in range(num_g) if predicted[k] < pred_threshold]
+
+  predicted_bottom_correct = [k for k in predicted_bottom if k in actual_bottom]
+  predicted_top_correct = [k for k in predicted_top if k in actual_top]
+
+  # print("Actual", np.min(actual), threshold, np.max(actual))
+  # print("Predicted", np.min(predicted), threshold, np.max(predicted))
+  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)

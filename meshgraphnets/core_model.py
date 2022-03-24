@@ -15,11 +15,22 @@
 # limitations under the License.
 # ============================================================================
 """Core learned graph net model."""
+import os
 
 import collections
 import functools
 import sonnet as snt
-import tensorflow.compat.v1 as tf
+# import tensorflow.compat.v1 as tf
+import tensorflow as tf
+
+from tfdeterminism import patch
+# patch()
+SEED = 55
+os.environ['PYTHONHASHSEED'] = str(SEED)
+# random.seed(SEED)
+tf.random.set_seed(SEED)
+
+
 
 EdgeSet = collections.namedtuple('EdgeSet', ['name', 'features', 'senders',
                                              'receivers'])
@@ -27,21 +38,32 @@ MultiGraph = collections.namedtuple('Graph', ['node_features', 'edge_sets'])
 from meshgraphnets import deforming_plate_model
 from meshgraphnets import common
 
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
 
-class GraphNetBlock(snt.AbstractModule):
+# class GraphNetBlock(snt.AbstractModule):
+class GraphNetBlock(snt.Module):
+
   """Multi-Edge Interaction Network with residual connections."""
 
   def __init__(self, model_fn, name='GraphNetBlock'):
-    super(GraphNetBlock, self).__init__(name=name)
+    # super(self).__init__(name=name)
+    super().__init__(name=name)
     self._model_fn = model_fn
+
+  @snt.once
+  def _initialize(self):
+    self._update_edge_features_fn = self._model_fn()
+    self._update_node_features_fn = self._model_fn()
 
   def _update_edge_features(self, node_features, edge_set):
     """Aggregrates node features, and applies edge function."""
     sender_features = tf.gather(node_features, edge_set.senders)
     receiver_features = tf.gather(node_features, edge_set.receivers)
     features = [sender_features, receiver_features, edge_set.features]
-    with tf.variable_scope(edge_set.name+'_edge_fn'):
-      return self._model_fn()(tf.concat(features, axis=-1))
+    # with tf.variable_scope(edge_set.name+'_edge_fn'):
+    # return self._model_fn()(tf.concat(features, axis=-1))
+    return self._update_edge_features_fn(tf.concat(features, axis=-1))
 
   def _update_node_features(self, node_features, edge_sets):
     """Aggregrates edge features, and applies node function."""
@@ -51,15 +73,20 @@ class GraphNetBlock(snt.AbstractModule):
       features.append(tf.math.unsorted_segment_sum(edge_set.features,
                                                    edge_set.receivers,
                                                    num_nodes))
-    with tf.variable_scope('node_fn'):
-      return self._model_fn()(tf.concat(features, axis=-1))
+    # with tf.variable_scope('node_fn'):
+    # return self._model_fn()(tf.concat(features, axis=-1))
+    return self._update_node_features_fn(tf.concat(features, axis=-1))
 
-  def _build(self, graph):
+
+  # @tf.function
+  def __call__(self, graph):
+  # def _build(self, graph):
     """Applies GraphNetBlock and returns updated MultiGraph."""
+    self._initialize()
 
     # apply edge functions
     new_edge_sets = []
-    for edge_set in graph.edge_sets:
+    for edge_set in graph.edge_sets: # There are two, world_edges and mesh_edges
       updated_features = self._update_edge_features(graph.node_features,
                                                     edge_set)
       new_edge_sets.append(edge_set._replace(features=updated_features))
@@ -75,7 +102,22 @@ class GraphNetBlock(snt.AbstractModule):
     return MultiGraph(new_node_features, new_edge_sets)
 
 
-class EncodeProcessDecode(snt.AbstractModule):
+class MyMLP():
+  def __init__(self, output_sizes, activation=tf.nn.relu, activate_final=False):
+
+    self.model = Sequential()
+    num_layers = len(output_sizes)
+    for index, output_size in enumerate(output_sizes):
+      if (index < num_layers - 1) or activate_final:
+        self.model.add(Dense(output_size, activation=activation))
+      else:
+        self.model.add(Dense(output_size))
+
+  def __call__(self, inputs):
+    return self.model(inputs)
+
+# class EncodeProcessDecode(snt.AbstractModule):
+class EncodeProcessDecode(snt.Module):
   """Encode-Process-Decode GraphNet model."""
 
   def __init__(self,
@@ -84,44 +126,83 @@ class EncodeProcessDecode(snt.AbstractModule):
                num_layers,
                message_passing_steps,
                name='EncodeProcessDecode'):
-    super(EncodeProcessDecode, self).__init__(name=name)
+    super().__init__(name=name)
+
     self._latent_size = latent_size
     self._output_size = output_size
     self._num_layers = num_layers
     self._message_passing_steps = message_passing_steps
 
+  
+  @snt.once # this might be necessary to fix what used to be controlled by variable scopes
+  def _initialize(self, graph):
+    '''Initialize all the MLPs'''
+    self._decoder_fn =  self._make_mlp(self._output_size, layer_norm=False)
+    self._node_latents_fn = self._make_mlp(self._latent_size)
+
+    self._edge_latent_fns = []
+    for k in range(len(graph.edge_sets)):
+      self._edge_latent_fns.append(self._make_mlp(self._latent_size))
+
+    model_fn = functools.partial(self._make_mlp, output_size=self._latent_size)
+    self.gnb = GraphNetBlock(model_fn)
+
+
   def _make_mlp(self, output_size, layer_norm=False): ## For gradient debugging, set layer_norm=False. It's typically = True
     """Builds an MLP."""
     widths = [self._latent_size] * self._num_layers + [output_size]
     network = snt.nets.MLP(widths, activate_final=False)
+    # network = MyMLP(widths, activate_final=False)
+
     if layer_norm:
       network = snt.Sequential([network, snt.LayerNorm()])
     return network
 
   def _encoder(self, graph):
     """Encodes node and edge features into latent features."""
-    with tf.variable_scope('encoder'):
-      node_latents = self._make_mlp(self._latent_size)(graph.node_features)
-      new_edges_sets = []
-      for edge_set in graph.edge_sets:
-        latent = self._make_mlp(self._latent_size)(edge_set.features)
-        new_edges_sets.append(edge_set._replace(features=latent))
+    # with tf.variable_scope('encoder'):
+    # node_latents = self._make_mlp(self._latent_size)(graph.node_features)
+    node_latents = self._node_latents_fn(graph.node_features)
+
+    new_edges_sets = []
+    for edge_latent_fn, edge_set in zip(self._edge_latent_fns, graph.edge_sets):  # There are two, world_edges and mesh_edges
+      # latent = self._make_mlp(self._latent_size)(edge_set.features)
+      latent = edge_latent_fn(edge_set.features)
+
+      new_edges_sets.append(edge_set._replace(features=latent))
+
     return MultiGraph(node_latents, new_edges_sets)
 
   def _decoder(self, graph):
     """Decodes node features from graph."""
+    '''
     with tf.variable_scope('decoder'):
       decoder = self._make_mlp(self._output_size, layer_norm=False)
       return decoder(graph.node_features)
+    '''
+    return self._decoder_fn(graph.node_features)
 
-  def _build(self, graph):
+  # @tf.function
+  def __call__(self, graph):
+  # def _build(self, graph):
     """Encodes and processes a multigraph, and returns node features."""
-    model_fn = functools.partial(self._make_mlp, output_size=self._latent_size)
+    self._initialize(graph)
+
+    # model_fn = functools.partial(self._make_mlp, output_size=self._latent_size)
     latent_graph = self._encoder(graph)
+
+    # self.gnb = GraphNetBlock(model_fn)
     for _ in range(self._message_passing_steps):
-      latent_graph = GraphNetBlock(model_fn)(latent_graph)
+      # latent_graph = GraphNetBlock(model_fn)(latent_graph)
+
+      latent_graph = self.gnb(latent_graph)
+      # latent_graph = GraphNetBlock(self.model_fn)(latent_graph)
+      # latent_graph = self._GNB(latent_graph)
     return self._decoder(latent_graph) # returns per-node output
 
+
+
+'''
 class SimplifiedNetwork(snt.AbstractModule):
 
   def __init__(self,
@@ -166,3 +247,4 @@ class SimplifiedNetwork(snt.AbstractModule):
     mlp_inputs = tf.ensure_shape(mlp_inputs, [1, 1 + 2292*3])
 
     return simplified_mlp(mlp_inputs)
+'''

@@ -15,8 +15,18 @@
 # limitations under the License.
 # ============================================================================
 """Functions to build evaluation metrics for cloth data."""
+import os
 
 import tensorflow.compat.v1 as tf
+
+from tfdeterminism import patch
+# patch()
+SEED = 55
+os.environ['PYTHONHASHSEED'] = str(SEED)
+# random.seed(SEED)
+tf.set_random_seed(SEED)
+
+
 import tensorflow_probability as tfp
 from meshgraphnets.common import NodeType
 from meshgraphnets import utils
@@ -135,7 +145,7 @@ def refine_inputs(model, inputs, FLAGS, grad_data, custom_constant=0):
 def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=False, tfn=0, eval_step=0):
   """Performs model rollouts and create stats."""
   # return model.loss(inputs), tf.constant(5, dtype=tf.float32)
-  initial_state = {k: v[20] for k, v in inputs.items()}
+  initial_state = {k: v[0] for k, v in inputs.items()}
 
   ################### WE HAVE SET INITIAL STATE TO STEP 20
 

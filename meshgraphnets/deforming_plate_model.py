@@ -15,9 +15,19 @@
 # limitations under the License.
 # ============================================================================
 """Model for FlagSimple."""
+import os
 
 import sonnet as snt
 import tensorflow.compat.v1 as tf
+
+from tfdeterminism import patch
+# patch()
+SEED = 55
+os.environ['PYTHONHASHSEED'] = str(SEED)
+# random.seed(SEED)
+tf.set_random_seed(SEED)
+
+
 import tensorflow_graphics.geometry.transformation as tfg_transformation
 
 
@@ -48,8 +58,8 @@ def open_gripper_at_pose(inputs):
 
   # euler = tf.zeros(3)
   # trans = tf.zeros(3)
-
   tf_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(euler)
+  # print(tf_from_euler)
   f_pc = tfg_transformation.rotation_matrix_3d.rotate(f_pc_original, tf_from_euler) + trans
   original_normal = tf.constant([1., 0., 0.], dtype=tf.float32)
   gripper_normal = tfg_transformation.rotation_matrix_3d.rotate(original_normal, tf_from_euler)
@@ -95,55 +105,68 @@ def gripper_world_pos(inputs):
 
 
 
-class Model(snt.AbstractModule):
+# @snt.allow_empty_variables
+class Model(snt.Module):
   """Model for static cloth simulation."""
 
   def __init__(self, learned_model, FLAGS, name='Model'):
-    super(Model, self).__init__(name=name)
-    with self._enter_variable_scope():
-      self.FLAGS = FLAGS
+    super().__init__(name=name)
+    # super().__init__(name=name)
 
-      self._learned_model = learned_model
+    ### DEBUGGIN SONNET
+    ####
 
-      ######### Output #########
-      output_size = utils.get_output_size(self.FLAGS)
+    # with self._enter_variable_scope():
+    # with tf.variable_scope("foo"):
+    self.FLAGS = FLAGS
+    self._learned_model = learned_model
 
-      self._output_normalizer = normalization.Normalizer(
-          size=output_size, name='output_normalizer') 
+    ######### Output #########
+    output_size = utils.get_output_size(self.FLAGS)
+    self._output_normalizer = normalization.Normalizer(
+        size=output_size, name='output_normalizer') 
 
-      ######### Auxiliary ########
-      aux_output_size = 1
-      self._aux_output_normalizer = normalization.Normalizer(
-          size=1, name='aux_output_normalizer') 
+    ######### Auxiliary ########
+    aux_output_size = 1
+    self._aux_output_normalizer = normalization.Normalizer(
+        size=1, name='aux_output_normalizer') 
 
-      ######### Node #########
-      node_feature_size = 3+1+common.NodeType.SIZE #  velocity + stress + node type
-      if not utils.stress_t_as_node_feature(self.FLAGS):
-        node_feature_size = 3+common.NodeType.SIZE # velocity + node type
-      if self.FLAGS.force_label_node:
-        node_feature_size += 1
+    ######### Node #########
+    node_feature_size = 3+1+common.NodeType.SIZE #  velocity + stress + node type
+    if not utils.stress_t_as_node_feature(self.FLAGS):
+      node_feature_size = 3+common.NodeType.SIZE # velocity + node type
+    if self.FLAGS.force_label_node:
+      node_feature_size += 1
 
-      self._node_normalizer = normalization.Normalizer(
-          size=node_feature_size, name='node_normalizer') 
+    self._node_normalizer = normalization.Normalizer(
+        size=node_feature_size, name='node_normalizer') 
 
-      ######### Mesh edge #########
-      self._edge_normalizer = normalization.Normalizer(
-          size=8, name='edge_normalizer')  # 2*(3D coord  + length) = 8
+    ######### Mesh edge #########
+    self._edge_normalizer = normalization.Normalizer(
+        size=8, name='edge_normalizer')  # 2*(3D coord  + length) = 8
 
-      ######### World edge #########
-      world_edge_feature_size = 3 + 1  # 3D coord  + length = 4
+    ######### World edge #########
+    world_edge_feature_size = 3 + 1  # 3D coord  + length = 4
 
-      if self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node:
-        world_edge_feature_size += 1 # force = 5
+    if self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node:
+      world_edge_feature_size += 1 # force = 5
 
-      if self.FLAGS.simplified_predict_stress_change_only:
-        if self.FLAGS.predict_stress_t_only:
-          world_edge_feature_size = 5 # 3D coord + length + curr force
-        else:
-          world_edge_feature_size = 6 # 3D coord + length + curr force, change in force
+    if self.FLAGS.simplified_predict_stress_change_only:
+      if self.FLAGS.predict_stress_t_only:
+        world_edge_feature_size = 5 # 3D coord + length + curr force
+      else:
+        world_edge_feature_size = 6 # 3D coord + length + curr force, change in force
 
-      self._world_edge_normalizer = normalization.Normalizer(
-          size=world_edge_feature_size, name='world_edge_normalizer') 
+    self._world_edge_normalizer = normalization.Normalizer(
+        size=world_edge_feature_size, name='world_edge_normalizer') 
+
+
+  def accumulate_stats(self, inputs):
+    initial_state = {k: v[0] for k, v in inputs.items()}
+    self._build_graph(initial_state, is_training=True) # is_training here is = accumulate
+    # Accumulate raw targets
+    combined_target = self.get_output_targets(initial_state)
+    self._output_normalizer(combined_target, accumulate=True)
 
   def _build_graph(self, inputs, is_training):
     """Builds input graph."""
@@ -193,6 +216,8 @@ class Model(snt.AbstractModule):
     relative_world_pos_mesh_edges = (tf.gather(world_pos, senders) -
                          tf.gather(world_pos, receivers))
 
+
+
     mesh_edge_features = tf.concat([
         relative_world_pos_mesh_edges,
         tf.norm(relative_world_pos_mesh_edges, axis=-1, keepdims=True),
@@ -205,6 +230,7 @@ class Model(snt.AbstractModule):
         features=self._edge_normalizer(mesh_edge_features, is_training),
         receivers=receivers,
         senders=senders)
+
 
     #################### World edge features #########
 
@@ -220,8 +246,8 @@ class Model(snt.AbstractModule):
       if self.FLAGS.node_total_force_t:
         force_label = inputs['force'][0,0] # Label every node/edge with total gripper force
       else:
-        force_label = inputs['force'][0,0] / (0.5 * tf.to_float(tf.shape(world_senders)[0])) # Label every node/world edge with total gripper force / num contacts
-        force_change_label = (inputs['target|force'][0,0] - inputs['force'][0,0]) / (0.5 * tf.to_float(tf.shape(world_senders)[0]))
+        force_label = inputs['force'][0,0] / (0.5 * tf.cast(tf.shape(world_senders)[0], tf.float32)) # Label every node/world edge with total gripper force / num contacts
+        force_change_label = (inputs['target|force'][0,0] - inputs['force'][0,0]) / (0.5 * tf.cast(tf.shape(world_senders)[0], tf.float32))
 
 
     relative_world_pos = (tf.gather(world_pos, world_senders) -
@@ -229,6 +255,7 @@ class Model(snt.AbstractModule):
 
 
     relative_world_norm = tf.norm(relative_world_pos, axis=-1, keepdims=True)
+
 
 
     if self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node and not self.FLAGS.simplified_predict_stress_change_only:
@@ -313,13 +340,17 @@ class Model(snt.AbstractModule):
         edge_sets=[mesh_edges, world_edges]), 2
 
   # Is this used? Yes in the background of AbstractModel
-  def _build(self, inputs, normalize=True, accumulate=False):
+  # @tf.function
+  def __call__(self, inputs, normalize=True, accumulate=False):
+
+  # def _build(self, inputs, normalize=True, accumulate=False):
 
     # For MLP
     ########
     # network_output = self._learned_model(inputs)
     # return self._update(inputs, network_output, normalize, accumulate)
     ###############
+
 
 
     graph, grad_debugs = self._build_graph(inputs, is_training=False)
@@ -329,39 +360,15 @@ class Model(snt.AbstractModule):
   def print_debug(self, inputs):
     """L2 loss on position."""
     # inputs_stacked = tf.concat([inputs['gripper_pos'], inputs['force'], inputs['tfn']], axis=1)
+    return tf.reduce_mean(inputs['world_pos'])
     inputs_stacked = tf.squeeze(tf.concat([inputs['gripper_pos'], inputs['tfn'],  inputs['gripper_pos']], axis=1))
     return tf.shape(inputs_stacked)
     return tf.shape(inputs['node_type'])
 
 
 
-  @snt.reuse_variables
-  def loss(self, inputs, normalize=True, accumulate=False):
-    """L2 loss on position."""
-
-    #### MLP #####
-    # network_output = self._learned_model(inputs)
-    # loss = (tf.reduce_mean(inputs['stress']) - network_output) ** 2
-    # return loss
-    ######
-
-    graph, debug_val = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
-    # graph = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
-
-    network_output = self._learned_model(graph)
-    # return network_output 
-    if normalize:
-      if utils.predict_some_stress_only(self.FLAGS):
-        stress_output = network_output
-      else:
-        object_output, stress_output = tf.split(network_output, [3, 1], 1)
-    else:
-      if utils.predict_some_stress_only(self.FLAGS):
-        stress_output = self._output_normalizer.inverse(network_output)
-      else:
-        object_output, stress_output = tf.split(self._output_normalizer.inverse(network_output), [3,1], 1)
-
-
+  def get_output_targets(self, inputs):
+    '''Get non-normalized targets from inputs'''
     # Target gripper pos change
     num_verts_total = tf.shape(inputs['mesh_pos'])[0]
 
@@ -394,6 +401,42 @@ class Model(snt.AbstractModule):
 
     if utils.predict_some_stress_only(self.FLAGS):
       combined_target = target_stress_change
+
+    return combined_target
+
+  # @snt.reuse_variables
+  # @tf.function
+  def loss(self, inputs, normalize=True, accumulate=False):
+    """L2 loss on position."""
+
+    # with tf.variable_scope("foo", reuse=True):
+    #### MLP #####
+    # network_output = self._learned_model(inputs)
+    # loss = (tf.reduce_mean(inputs['stress']) - network_output) ** 2
+    # return loss
+    ######
+
+    # Get targets
+    combined_target = self.get_output_targets(inputs)
+
+    # Get prediction
+    graph, debug_val = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
+    # graph = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
+
+    network_output = self._learned_model(graph)
+
+
+    # return network_output 
+    if normalize:
+      if utils.predict_some_stress_only(self.FLAGS):
+        stress_output = network_output
+      else:
+        object_output, stress_output = tf.split(network_output, [3, 1], 1)
+    else:
+      if utils.predict_some_stress_only(self.FLAGS):
+        stress_output = self._output_normalizer.inverse(network_output)
+      else:
+        object_output, stress_output = tf.split(self._output_normalizer.inverse(network_output), [3,1], 1)
 
 
 
@@ -437,41 +480,6 @@ class Model(snt.AbstractModule):
       loss = object_loss + stress_loss
 
 
-    if self.FLAGS.aux_mesh_edge_distance_change:
-      normalized_pred_new_pos = cur_position + object_output
-
-      # Get predicted new position (real, not normalized)
-      real_pred_position_change, _ = tf.split(self._output_normalizer.inverse(network_output), [3,1], 1)
-      real_pred_next_pos = cur_position + real_pred_position_change
-
-      senders, receivers = common.sr_mesh_edges(inputs['mesh_edges'])
-
-      current_relative_world_pos = (tf.gather(inputs['world_pos'], senders) -
-                            tf.gather(inputs['world_pos'], receivers))
-      current_relative_world_norm = tf.norm(current_relative_world_pos, axis=-1, keepdims=True)
-
-      next_relative_world_pos = (tf.gather(inputs['target|world_pos'], senders) -
-                            tf.gather(inputs['target|world_pos'], receivers))
-      next_relative_world_norm = tf.norm(next_relative_world_pos, axis=-1, keepdims=True)
-
-      pred_next_relative_world_pos = (tf.gather(real_pred_next_pos, senders) -
-                            tf.gather(real_pred_next_pos, receivers))
-      pred_next_relative_world_norm = tf.norm(pred_next_relative_world_pos, axis=-1, keepdims=True)
-
-
-      gt_mesh_edge_norm_change = next_relative_world_norm - current_relative_world_norm
-      pred_mesh_edge_norm_change = pred_next_relative_world_norm - current_relative_world_norm
-
-      gt_mesh_edge_norm_change_normalized = self._aux_output_normalizer(gt_mesh_edge_norm_change, accumulate)
-      pred_mesh_edge_norm_change_normalized = self._aux_output_normalizer(pred_mesh_edge_norm_change, False)
-
-
-      mesh_distance_error = tf.reduce_sum((gt_mesh_edge_norm_change_normalized - pred_mesh_edge_norm_change_normalized)**2, axis=1) 
-      mesh_distance_loss = tf.reduce_mean(mesh_distance_error)
-      loss += mesh_distance_loss
-
-
-
     return loss
 
 
@@ -513,17 +521,6 @@ class Model(snt.AbstractModule):
 
 
     # Get predictions
-    '''
-    if self.FLAGS.predict_log_stress_t_only:
-      _ , stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
-      position_change = position_change_gt
-    elif self.FLAGS.predict_log_stress_t1_only:
-      _, stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
-      position_change = position_change_gt
-    elif self.FLAGS.predict_log_stress_change_only:
-      _, stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
-      position_change = position_change_gt
-    '''
     if utils.predict_some_stress_only(self.FLAGS): # In this case
       stress_change = self._output_normalizer.inverse(per_node_network_output)
 
@@ -575,14 +572,11 @@ class Model(snt.AbstractModule):
     # Removed just for gradient simplification 
     # next_stress_pred = tf.nn.relu(next_stress_pred)
 
-
     # round to nearest next_gripper_pos
     gripper_vert_pos_change = tf.gather(position_change, actuator_idx)
 
     # Get loss val
     loss_val = self.loss(inputs, normalize, accumulate)
 
-
-    # return next_position_pred, curr_stress_pred # For when predicting gripper movement too
 
     return next_position_pred, next_stress_pred, loss_val
