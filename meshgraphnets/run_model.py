@@ -18,6 +18,8 @@
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
+os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
 import pickle
 import sys
 
@@ -27,6 +29,8 @@ from absl import flags
 from absl import logging
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability as tfp
+import timeit
 
 
 # Try to run with more gpu usage in TF 2
@@ -92,6 +96,7 @@ flags.DEFINE_bool('node_total_force_t', False, 'Whether each node should be labe
 # The default is currently labelling mesh edges with normalized force over nodes in contact
 flags.DEFINE_bool('compute_world_edges', False, 'Whether to compute world edges')
 flags.DEFINE_bool('use_cpu', False, 'Use CPU rather than GPU')
+flags.DEFINE_bool('eager', False, 'Use eager execution')
 
 
 # Exactly one of these must be set to True
@@ -119,7 +124,8 @@ flags.DEFINE_bool('use_pd_stress', True, 'Use pd_stress rather than stress for i
 flags.DEFINE_integer('num_objects', 1, 'No. of objects to train on')
 flags.DEFINE_integer('n_horizon', 1, 'No. of steps in training horizon')
 
-
+flags.DEFINE_string('loss_function', 'MSE',
+                    'which loss function to use')
 
 PARAMETERS = {
     'cfd': dict(noise=0.02, gamma=1.0, field='velocity', history=False,
@@ -139,7 +145,7 @@ LEN_TRAJ = 0
 
 
 
-def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=100):
+def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None):
   # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
   ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
   
@@ -156,28 +162,39 @@ def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=10
   noise_field = params['noise_field']
   noise_scale = params['noise']
 
-  # if n_training_trajectories != 100:
+
   if not test:
     ds = ds.take(FLAGS.num_training_trajectories) 
   else:
-    ds = ds.skip(FLAGS.num_training_trajectories)
+    # ds = ds.skip(FLAGS.num_training_trajectories)
     ds = ds.take(FLAGS.num_testing_trajectories)
 
+  # Filter trajectories for outliers
+  def filter_func(elem, cutoff):
+      """ return True if the element is to be kept """
+      last_stress = elem["stress"]
+      max_last_stress = tf.reduce_max(last_stress)
+      return max_last_stress <= cutoff
+  if cutoff:
+    ds = ds.filter(lambda ff: filter_func(ff, cutoff))
 
   # Shuffle trajectories selected for training
-  ds = ds.shuffle(100)
+  ds = ds.shuffle(500)
 
   def repeat_and_shift(trajectory):
     out = {}
     for key, val in trajectory.items():
       shifted_lists = []
-
       for i in range(LEN_TRAJ - n_horizon + 1):
         shifted_list = tf.roll(val, shift=-i, axis=0)
-        shifted_lists.append(shifted_list)
+        shifted_lists.append(shifted_list[:n_horizon])
+
+
       out[key] = shifted_lists
 
+
     return tf.data.Dataset.from_tensor_slices(out)
+
 
   def use_pd_stress(frame):
     frame['stress'] = frame['pd_stress']
@@ -207,11 +224,14 @@ def get_flattened_dataset(ds, params, n_horizon=None, n_training_trajectories=10
     ds =  ds.flat_map(repeat_and_shift)
 
     # Add noise
-    ds = ds.map(add_noise, num_parallel_calls=1) #Used to be 8
+    ds = ds.map(add_noise, num_parallel_calls=8) #Used to be 8
 
 
   ds = ds.shuffle(500)
-  return ds
+
+  ds = dataset.batch_dataset(ds, 5)
+
+  return ds.prefetch(tf.data.AUTOTUNE)
 
 
 def evaluator_file_split():
@@ -220,6 +240,7 @@ def evaluator_file_split():
   train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
   train_files = [k for k in total_files if '00000007' in k] # circular disk
   train_files = [k for k in total_files if '00000016' in k] # rectangular prism
+  train_files = [k for k in total_files if 'rectangle' in k] # rectangle dense grasps
 
   if utils.using_dm_dataset(FLAGS):
     train_files = [k for k in total_files if 'valid' in k] # MGN dataset
@@ -238,36 +259,12 @@ def learner(model, params):
   train_log_dir = FLAGS.checkpoint_dir
   # train_summary_writer = tf.summary.create_file_writer(train_log_dir)
 
+
   n_horizon = FLAGS.n_horizon
   train_files, test_files = evaluator_file_split()
 
 
-  ### Load datasets by files in folders 
-  train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
-  test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
-
-  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, n_training_trajectories=FLAGS.num_training_trajectories)
-  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, n_training_trajectories=FLAGS.num_training_trajectories)
-  test_ds = get_flattened_dataset(test_ds, params)
-
-
-  ##### TF 2 optimizer
-  optimizer = snt.optimizers.Adam(learning_rate=1e-4)
-
-  def train_step(inputs):
-    with tf.GradientTape() as tape:
-      initial_state = {k: v[0] for k, v in inputs.items()}
-      _, _, loss_val = model(initial_state)
-      loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
-
-    train_params = model.trainable_variables
-    grads = tape.gradient(loss_op, train_params)
-    optimizer.apply(grads, train_params)
-
-    return loss_op
-
-
-
+  ############### Checkpointing
   losses = []
   lowest_val_errors = [sys.maxsize]
 
@@ -275,65 +272,170 @@ def learner(model, params):
   ### Use normal saver
   num_best_models = 2
 
-  # SAVER is to be updated in TF2 
+
+  # Try to do checkpointing in TF 2
+  checkpoint = tf.train.Checkpoint(module=model)
+  manager = tf.train.CheckpointManager(checkpoint, FLAGS.checkpoint_dir, max_to_keep=2)
+
+  checkpoint_path = os.path.join(FLAGS.checkpoint_dir, "checkpoint_name")
+  latest = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
+  ################
+
+
+  ### Load datasets by files in folders 
+  train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
+  test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
+
+  train_ds_with_outliers = get_flattened_dataset(train_ds_og, params, cutoff=None)
+
+  # Scan training data for outliers in high stresses
   '''
-  saver = tf.train.Saver(max_to_keep=num_best_models)
+  if latest is None:
+    print("Filtering out outliers")
+
+    iterator = iter(train_ds_with_outliers)
+    final_stresses = []
+    traj_count = 0
+    try:
+      while True:
+        traj_count += 1
+        inputs = iterator.get_next()
+
+        final_stresses.append(tf.reduce_max(inputs["stress"][-1])  )
+
+    except tf.errors.OutOfRangeError:
+      pass
+  '''
+  # Save this to dict per object name
+  percentile_cutoff = 1e9#tfp.stats.percentile(final_stresses, 97, interpolation='linear')
 
 
-  with tf.Session(config=config) as sess: #tf2
 
-  ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
-  if ckpt and ckpt.model_checkpoint_path:
-    print("Restoring checkpoint")
-    saver.restore(sess, ckpt.model_checkpoint_path)
+ 
+  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=None) #percentile_cutoff
+  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=None) #percentile_cutoff
+  test_ds = get_flattened_dataset(test_ds, params, cutoff=percentile_cutoff)
+
+
+
+
+  ##### TF 2 optimizer
+  optimizer = snt.optimizers.Adam(learning_rate=FLAGS.learning_rate)
+  @tf.function(input_signature=[model.input_signature_dict])
+  def train_step(inputs):
+    with tf.GradientTape() as tape:
+      loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
+
+    grads = tape.gradient(loss_op, model.trainable_variables)
+    optimizer.apply(grads, model.trainable_variables)
+
+    return loss_op
+
+
+
+
+  if latest is not None:
+    print("Restoring previous checkpoint")
+    checkpoint.restore(latest)
   else:
     print("No existing checkpoint")
-    sess.run(tf.global_variables_initializer())
-  '''
+
+
 
   # Take in all training data for normalization stats
-  iterator = iter(single_train_ds)
 
-  num_train_dp = 0
-  print("Accumulating stats without training")
+  # '''
+  t0_accumulate = timeit.default_timer()
+  if latest is None:
+    iterator = iter(single_train_ds)
 
+    num_train_dp = 0
+    print("Accumulating stats without training")
+
+    try:
+      while True:
+        inputs = iterator.get_next()
+
+        print(inputs['world_pos'])
+
+        # model.accumulate_stats(inputs)
+
+        num_train_dp += 1
+        if num_train_dp % 1000 == 0:
+          print("Accumulated", num_train_dp)
+
+    except tf.errors.OutOfRangeError:
+      print("Accumulated stats. Total number of train points:", num_train_dp)
+      tnext = timeit.default_timer()
+      print("Time taken for accumulation", timeit.default_timer() - t0_accumulate)
+      pass
+  # '''
+  # print(model.accumulate_stats.pretty_printed_concrete_signatures())  
+  quit()
+  ########### Get distribution of all stresses seen during training
+  '''
+  iterator = iter(test_ds)
+
+  traj_count = 0
+  final_stresses = []
   try:
     while True:
       inputs = iterator.get_next()
-      model.accumulate_stats(inputs)
-      num_train_dp += 1
-
+      kk = tf.reduce_max(inputs["stress"][-1])
+      print(traj_count, kk)
+ 
+      final_stresses.append(kk)
+      traj_count += 1
 
   except tf.errors.OutOfRangeError:
-    print("Accumulated stats. Total number of train points:", num_train_dp)
-    pass
+    print("This many trajectories seen", traj_count)
 
+  print(max(final_stresses), np.argmax(final_stresses))
+  import matplotlib.pyplot as plt 
+  plt.plot(final_stresses)
+  plt.show()
+
+  quit()
+  '''
+  #####################
 
   step = 0
 
-  tf.profiler.experimental.start(FLAGS.checkpoint_dir)
+  # tf.profiler.experimental.start(FLAGS.checkpoint_dir)
   for i in range(FLAGS.num_epochs):
     iterator = iter(train_ds)
 
     train_losses = []
 
-    try:
-      while True:
-        with tf.profiler.experimental.Trace('train', step_num=step, _r=1):
-          inputs = iterator.get_next()
-          step += 1
 
-          train_loss = train_step(inputs)
-          train_losses.append(train_loss)
+    try:
+      t0 = timeit.default_timer()
+      while True:
+        # with tf.profiler.experimental.Trace('train', step_num=step, _r=1):
+        inputs = iterator.get_next()
+        step += 1
+
+
+
+        train_loss = train_step(inputs)
+        train_losses.append(train_loss)
 
         if step % 100 == 0:
           logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
 
 
+
     except tf.errors.OutOfRangeError:
       # with train_summary_writer.as_default():
         # tf.summary.scalar('train_loss', np.mean(train_losses), step=i)
+      tnext = timeit.default_timer()
+      print("------Time taken for epoch", i, ":", tnext - t0)
+
+
       pass
+
+    # print(train_step.pretty_printed_concrete_signatures())  
+    continue
 
 
     ################
@@ -354,6 +456,7 @@ def learner(model, params):
 
           validation_counter += 1
           test_loss, test_traj_data, test_scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
+
 
           test_losses.append(test_loss)
           test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
@@ -377,9 +480,10 @@ def learner(model, params):
         lowest_val_errors.sort()
         lowest_val_errors = lowest_val_errors[:num_best_models]
         print("Saving checkpoint. Lowest validation errors updated:", lowest_val_errors)
-        # if FLAGS.checkpoint_dir:
-          # Doesn't currently work with tf2
-          # saver.save(sess, os.path.join(FLAGS.checkpoint_dir, 'model'), global_step=global_step)
+        if FLAGS.checkpoint_dir:
+          print("Saving")
+          save_path = manager.save()
+          print("Saved to", save_path)
 
     # Record losses in text file
     logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
@@ -394,7 +498,7 @@ def learner(model, params):
       file.close()
 
   logging.info('Training complete.')
-  tf.profiler.experimental.stop()
+  # tf.profiler.experimental.stop()
 
 
 
@@ -427,258 +531,255 @@ def evaluator(model, params):
   # test_objects = [k for k in train_files if '00000007' in k]
   test_objects = test_files 
 
+  # Restore checkpoint
+  checkpoint = tf.train.Checkpoint(module=model)
+  latest = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
+
+  if latest is not None:
+    print("Restoring previous checkpoint")
+    checkpoint.restore(latest)
+
+
+  # ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
+  # ds = get_flattened_dataset(ds, params)
+
+
 
   for ot, obj_file in enumerate(test_objects):
     print("===", obj_file, ot, "of", len(test_files))
     ds = dataset.load_dataset(FLAGS.dataset_dir, [obj_file], FLAGS.num_objects)
     ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
-    inputs = tf.data.make_one_shot_iterator(ds).get_next()
-    loss_val_temp, traj_ops, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
+    iterator = iter(ds)
 
 
-    # force = tf.placeholder(tf.float32)
-    # loss_val_temp2, traj_ops2, scalar_op2 = params['evaluator'].evaluate(model, inputs, FLAGS) # For refinement?
-
-    # Try to get gradients
-    grad_op = tf.gradients(traj_ops['mean_pred_stress'], traj_ops['tfn'])#, stop_gradients=[traj_ops['tfn'][:3], traj_ops['world_edges']])
-    traj_ops2 = params['evaluator'].refine_inputs(model, inputs, FLAGS, grad_op, tf.constant(1e-10, dtype=tf.float32))
-
-    cc_range = np.linspace(-1e-10, 1e-10, 11) # for approximate gradient
 
 
-    traj_ops2_multiple = [params['evaluator'].refine_inputs(model, inputs, FLAGS, grad_op, tf.constant(cc, dtype=tf.float32)) for cc in cc_range]
-    foo = [params['evaluator'].evaluate(model, inputs, FLAGS, eval_step=cc) for cc in range(0, 48, 5)]
-    traj_ops_multiple = [f[1] for f in foo]
 
+    traj_idx = 0
+
+    # writer = tf.summary.FileWriter("output", sess.graph)
+
+
+    # Sort predicted and final stresses
+    actual_final_stresses = dict()
+    pred_final_stresses = dict()
+
+    actual_final_deformations = dict()
+    pred_final_deformations = dict()
+    for k in ['mean', 'max', 'median']:
+      actual_final_stresses[k], pred_final_stresses[k] = [], []
+
+      actual_final_deformations[k], pred_final_deformations[k] = [], []
+      
+
+    num_decrease, num_increase = 0, 0
     try:
-      tf.train.create_global_step()
-    except:
+      # while True:
+      for traj_idx in range(20): # should be 48
+        inputs = iterator.get_next()
+
+        # if traj_idx < 200:
+        #   continue
+
+
+
+        # Calculate gradients
+        calculate_gradients = False
+        if calculate_gradients:
+          optimizer = snt.optimizers.Adam(learning_rate=5e-4) #1e-7
+          inputs = {k: v[20:21] for k, v in inputs.items()}
+          inputs['tfn'] = tf.Variable(inputs['tfn'])
+
+
+          def refine_step(inputs):
+            with tf.GradientTape() as tape:
+              tape.watch(inputs['tfn'])
+              original_tfn_np = inputs['tfn'].numpy()
+              original_tfn = inputs['tfn']
+
+              direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
+
+            input_grad = -1. * tape.gradient(traj_data['mean_pred_stress'], inputs['tfn'])
+
+            # Optimize over input
+            optimizer.apply(input_grad, [inputs['tfn']])
+
+            # Keep the euler part the same
+            input_grad_np = input_grad.numpy()
+            updated_input_np = inputs['tfn'].numpy()
+            updated_input_np[:, :3, :] = original_tfn_np[:, :3, :]
+
+            inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np))
+            return traj_data['mean_pred_stress'], inputs
+
+            # print("Original mean pred stress", traj_data['mean_pred_stress'].numpy())
+
+          original_k = 0
+
+          import matplotlib
+          matplotlib.use('TkAgg')
+          from matplotlib import animation
+          import matplotlib.pyplot as plt 
+
+
+          # Optimize over inputs using optimizer
+          # '''
+          refined_stresses = []
+          world_pos_traj= []
+          tfn_traj = []
+          f_verts_traj = []
+          for k in range(50):
+            mean_pred_stress, inputs = refine_step(inputs)
+            print(mean_pred_stress)
+            refined_stresses.append(mean_pred_stress)
+            world_pos_traj.append(inputs['world_pos'].numpy())
+            tfn_traj.append(inputs['tfn'].numpy())
+
+            # Infer gripper pos at first contact
+            initial_state = {k: v[0] for k, v in inputs.items()}
+            # print(initial_state['tfn'])
+            initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
+            g_pos = np.random.rand()
+            f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
+            f_verts_traj.append(f_verts.numpy())
+
+          # '''
+          fig2 = plt.figure()
+          plt.plot(refined_stresses)
+          plt.xlabel("Iteration step #")
+          plt.ylabel("Predicted mean stress")
+          # plt.show()
+
+          fig = plt.figure(figsize=(8, 8))
+          ax = fig.add_subplot(111, projection='3d')
+
+          def animate(frame_num):
+            ax.cla()
+
+            world_pos = world_pos_traj[frame_num]
+            f_verts_pos = f_verts_traj[frame_num]
+            X, Y, Z = world_pos.T
+            Xf, Yf, Zf = f_verts_pos.T
+            ax.scatter(X, Y, Z)
+            ax.scatter(Xf, Yf, Zf)
+            return fig,
+
+
+
+          # Plot the refined grasp pose + object
+          _ = animation.FuncAnimation(fig, animate, frames=50, repeat=False)
+          plt.show(block=True)
+          # quit()
+          continue
+
+
+
+        else:
+          direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS)
+
+
+
+
+
+        logging.info('Rollout trajectory %d', traj_idx)
+        traj_idx += 1
+
+
+
+
+
+
+        trajectories.append(traj_data)
+        scalars.append(scalar_data)
+
+        actual_final_stresses['mean'].append(np.mean(traj_data['gt_stress'][-1]))
+        actual_final_stresses['max'].append(np.max(traj_data['gt_stress'][-1]))
+
+        pred_final_stresses['mean'].append(np.mean(traj_data['pred_stress'][-1]))
+        pred_final_stresses['max'].append(np.max(traj_data['pred_stress'][-1]))
+
+        # print(pred_final_stresses['mean'][-1], actual_final_stresses['mean'][-1])
+        # '''
+
+
+
+        mean_a, max_a, median_a = utils.get_global_deformation_metrics(traj_data['gt_pos'][0].numpy(), traj_data['gt_pos'][-1].numpy())
+        mean_p, max_p, median_p = utils.get_global_deformation_metrics(traj_data['pred_pos'][0].numpy(), traj_data['pred_pos'][-1].numpy())
+
+
+
+        actual_final_deformations['mean'].append(mean_a)
+        actual_final_deformations['max'].append(max_a)
+        actual_final_deformations['median'].append(median_a)
+
+        pred_final_deformations['mean'].append(mean_p)
+        pred_final_deformations['max'].append(max_p)
+        pred_final_deformations['median'].append(median_p)
+
+        print("Final error", scalar_data['stress_error'][-1], scalar_data['rollout_losses'][-1])
+        #print("Baseline final error", scalar_data['baseline_pos_final_error'])
+        #print("Sum of gt final pos", np.sum(traj_data['gt_pos'][-1]))
+        #print("Sum of pred final pos", np.sum(traj_data['pred_pos'][-1]))
+        # quit()
+
+
+        # '''
+
+    except tf.errors.OutOfRangeError:
       pass
 
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    with tf.train.MonitoredTrainingSession(
-        checkpoint_dir=FLAGS.checkpoint_dir,
-        config=config,
-        save_checkpoint_secs=None,
-        save_checkpoint_steps=None) as sess:
+    # plt.show()
+
+    '''
+    num_total = num_increase + num_decrease
+
+    print("Num increase", num_increase, num_increase/num_total)
+    print("Num decrease", num_decrease, num_decrease/num_total)
+    print("Total", num_total)
+    quit()
+    '''
+    ################
+    '''
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.hist(pred_final_stresses['mean'], alpha=0.5, label="pred")
+    plt.hist(actual_final_stresses['mean'], alpha=0.5, label="gt")
+    plt.legend()
+
+    plt.figure()
+    plt.scatter(actual_final_stresses['mean'], pred_final_stresses['mean'], label="pred")
+    plt.scatter(actual_final_stresses['mean'], actual_final_stresses['mean'], label="gt")
+    plt.legend()
+    
+    plt.show()
+    '''
+
+    ####################
+
+    for k in ['mean', 'max', 'median']:
+      all_object_actual_final_stresses[k].extend(actual_final_stresses[k])
+      all_object_pred_final_stresses[k].extend(pred_final_stresses[k])
+      all_object_actual_final_deformations[k].extend(actual_final_deformations[k])
+      all_object_pred_final_deformations[k].extend(pred_final_deformations[k])
 
 
-      traj_idx = 0
+    indices = list(range(len(actual_final_stresses)))
 
-      # writer = tf.summary.FileWriter("output", sess.graph)
+    # Classify by threshold per object
+    preds = [pred_final_stresses, pred_final_deformations]
+    actuals = [actual_final_stresses, actual_final_deformations]
+    runnings = [stresses_accuracy_running, deformations_accuracy_running]
+    metric_names = ["Stress", "Deformation"]
+    for ind, (metric_name, pred, actual) in enumerate(zip(metric_names, preds, actuals)):
+      print("======Metric:", metric_name)
+      for m_type in ['mean', 'max']:
+        num_correct, num_total = utils.classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
+        # num_correct, num_total = utils.classification_accuracy_ranking(pred[m_type], actual[m_type], 50)
 
-
-
-      # Sort predicted and final stresses
-      actual_final_stresses = dict()
-      pred_final_stresses = dict()
-
-      actual_final_deformations = dict()
-      pred_final_deformations = dict()
-      for k in ['mean', 'max', 'median']:
-        actual_final_stresses[k], pred_final_stresses[k] = [], []
-
-        actual_final_deformations[k], pred_final_deformations[k] = [], []
-        
-
-      num_decrease, num_increase = 0, 0
-      try:
-        # while True:
-        for traj_idx in range(48):
-
-          if traj_idx < 43:
-            traj_data = sess.run(traj_ops)
-            # print(traj_data['gripper_pos_all'])
-            continue
-
-
-          logging.info('Rollout trajectory %d', traj_idx)
-          traj_idx += 1
-
-
-          # scalar_data, traj_data = sess.run([scalar_op, traj_ops])
-          # scalar_data, traj_data, grad_data = sess.run([scalar_op, traj_ops, grad_op])
-          # scalar_data, traj_data, grad_data, traj_data2 = sess.run([scalar_op, traj_ops, grad_op, traj_ops2])
-          grad_data, traj_data2_group = sess.run([grad_op, traj_ops2_multiple])
-          # traj_data_group = sess.run(traj_ops_multiple)
-
-          # '''
-          # writer.close()
-          ''
-
-          # Print grad
-          # print("original tfn\n", traj_data['tfn'])
-          # print(grad_data)
-          # print("refined tfn\n", traj_data2['refined_tfn'])
-          # print(traj_data['inputs']['gripper_pos'])
-          # print(grad_data)
-          # quit()
-          # continue
-
-          # print("Og gripperp os")
-          # print(traj_data2['og_gripper_pos'])
-          # print(traj_data['gripper_pos'])
-          # print("Grad data")
-          # print(traj_data2['grad_data'])
-          # print("Constant")
-          # print(traj_data2['constant'])
-          # print("Refined gripper pos")
-          # print(traj_data2['refined_tfn'])
-
-          # import matplotlib.pyplot as plt
-          # training = [5.811185, 122.613304, 303.02414, 496.1153, 688.7827, 887.1828, 1079.305, 1274.746, 1467.6509, 1627.7112]
-          # gp = [0.01889196, 0.018531725, 0.018031925, 0.017510846, 0.016992375, 0.016460568, 0.015929282, 0.01540412, 0.014869615, 0.014420912]
-          # perturb = [716.0517, 708.79803, 704.4782, 695.7274, 688.7843, 685.0667, 680.46497, 675.292, 668.7712, 664.2909]
-
-          # plt.scatter(gp, training)
-          # plt.scatter(gp, perturb)
-          # plt.show()
-
-          # quit()
-
-
-          # print(traj_data['inside_grad'])
-          # print("Original and final stress")
-          # print(traj_data['gripper_pos'])
-          # print("Mean pred stress", traj_data['mean_pred_stress'])
-          # print(traj_data2['refined_tfn'])
-          # print(traj_data2['og_gripper_pos'])
-          # print(traj_data2['mean_pred_stress'])
-          # print("The grad")
-          # print(traj_data2['grad'])
-          # print(traj_data2['grad_data'])
-          # continue
-          
-
-
-
-          # Plot cost landscape
-          # '''
-          resulting_mean_pred_stresses = [k['mean_pred_stress'] for k in traj_data2_group]
-          print(cc_range)
-          print(resulting_mean_pred_stresses)
-          numerical_grad = (resulting_mean_pred_stresses[-1] - resulting_mean_pred_stresses[0]) / (np.max(cc_range) - np.min(cc_range))
-          print("tf gradient", grad_data)
-          print("numerical gradient", numerical_grad)
-          import matplotlib.pyplot as plt 
-          plt.plot(cc_range, resulting_mean_pred_stresses, 'o-')
-          plt.show(block=False)
-          continue
-          # '''
-
-
-
-
-          print("----- Stress before and after refinement")
-          print(traj_data['mean_pred_stress'], traj_data2['mean_pred_stress'])
-          if traj_data2['mean_pred_stress'] > traj_data['mean_pred_stress']:
-            num_increase += 1
-          else:
-            num_decrease += 1
-
-          # Plot
-          # f_verts = utils.f_verts_at_pos(traj_data['tfn'], traj_data['gripper_pos'])
-          # f_verts_refined = utils.f_verts_at_pos(traj_data2['refined_tfn'], traj_data['gripper_pos'])
-          # mesh_only_pos = traj_data['world_pos'][1180:,:]
-          # import matplotlib.pyplot as plt 
-          # fig = plt.figure(figsize=(8, 8))
-          # ax = fig.add_subplot(111, projection='3d')
-          # X, Y, Z = mesh_only_pos.T
-          # fx, fy, fz = f_verts.T
-          # frx, fry, frz = f_verts_refined.T
-          # ax.scatter(X, Y, Z)
-          # ax.scatter(fx, fy, fz)
-          # ax.scatter(frx, fry, frz)
-          # plt.show()
-
-
-          continue
-
-          trajectories.append(traj_data)
-          scalars.append(scalar_data)
-
-          actual_final_stresses['mean'].append(np.mean(traj_data['gt_stress'][-1]))
-          actual_final_stresses['max'].append(np.max(traj_data['gt_stress'][-1]))
-
-          pred_final_stresses['mean'].append(np.mean(traj_data['pred_stress'][-1]))
-          pred_final_stresses['max'].append(np.max(traj_data['pred_stress'][-1]))
-
-          # print(pred_final_stresses['mean'][-1], actual_final_stresses['mean'][-1])
-          # '''
-          mean_a, max_a, median_a = utils.get_global_deformation_metrics(traj_data['gt_pos'][0], traj_data['gt_pos'][-1])
-          mean_p, max_p, median_p = utils.get_global_deformation_metrics(traj_data['pred_pos'][0], traj_data['pred_pos'][-1])
-
-          actual_final_deformations['mean'].append(mean_a)
-          actual_final_deformations['max'].append(max_a)
-          actual_final_deformations['median'].append(median_a)
-
-          pred_final_deformations['mean'].append(mean_p)
-          pred_final_deformations['max'].append(max_p)
-          pred_final_deformations['median'].append(median_p)
-
-          print("Final error", scalar_data['stress_error'][-1], scalar_data['rollout_losses'][-1])
-          #print("Baseline final error", scalar_data['baseline_pos_final_error'])
-          #print("Sum of gt final pos", np.sum(traj_data['gt_pos'][-1]))
-          #print("Sum of pred final pos", np.sum(traj_data['pred_pos'][-1]))
-          # quit()
-
-
-          # '''
-
-      except tf.errors.OutOfRangeError:
-        pass
-
-      plt.show()
-
-      num_total = num_increase + num_decrease
-
-      print("Num increase", num_increase, num_increase/num_total)
-      print("Num decrease", num_decrease, num_decrease/num_total)
-      print("Total", num_total)
-      quit()
-      ################
-      '''
-      import matplotlib.pyplot as plt
-      plt.figure()
-      plt.hist(pred_final_stresses['mean'], alpha=0.5, label="pred")
-      plt.hist(actual_final_stresses['mean'], alpha=0.5, label="gt")
-      plt.legend()
-
-      plt.figure()
-      plt.scatter(actual_final_stresses['mean'], pred_final_stresses['mean'], label="pred")
-      plt.scatter(actual_final_stresses['mean'], actual_final_stresses['mean'], label="gt")
-      plt.legend()
-      
-      plt.show()
-      '''
-
-      ####################
-
-      for k in ['mean', 'max', 'median']:
-        all_object_actual_final_stresses[k].extend(actual_final_stresses[k])
-        all_object_pred_final_stresses[k].extend(pred_final_stresses[k])
-        all_object_actual_final_deformations[k].extend(actual_final_deformations[k])
-        all_object_pred_final_deformations[k].extend(pred_final_deformations[k])
-
-
-      indices = list(range(len(actual_final_stresses)))
-
-      # Classify by threshold per object
-      preds = [pred_final_stresses, pred_final_deformations]
-      actuals = [actual_final_stresses, actual_final_deformations]
-      runnings = [stresses_accuracy_running, deformations_accuracy_running]
-      metric_names = ["Stress", "Deformation"]
-      for ind, (metric_name, pred, actual) in enumerate(zip(metric_names, preds, actuals)):
-        print("======Metric:", metric_name)
-        for m_type in ['mean', 'max']:
-          num_correct, num_total = utils.classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
-          # num_correct, num_total = utils.classification_accuracy_ranking(pred[m_type], actual[m_type], 50)
-
-          print(m_type, "accuracy:", num_correct / num_total, "of", num_total)
-          runnings[ind][m_type][0] += num_correct
-          runnings[ind][m_type][1] += num_total
-          print(m_type, "Running accuracy", runnings[ind][m_type][0]/runnings[ind][m_type][1], "of", runnings[ind][m_type][1])
+        print(m_type, "accuracy:", num_correct / num_total, "of", num_total)
+        runnings[ind][m_type][0] += num_correct
+        runnings[ind][m_type][1] += num_total
+        print(m_type, "Running accuracy", runnings[ind][m_type][0]/runnings[ind][m_type][1], "of", runnings[ind][m_type][1])
 
 
   all_preds = [all_object_pred_final_stresses, all_object_pred_final_deformations]
@@ -696,7 +797,7 @@ def evaluator(model, params):
     # for key in scalars[0]:
     #   logging.info('%s: %g', key, np.mean([x[key] for x in scalars]))
 
-  with open(FLAGS.rollout_path, 'wb') as fp:
+  with open(os.path.join(FLAGS.checkpoint_dir, 'rollout.pkl'), 'wb') as fp:
     pickle.dump(trajectories, fp)
 
 ###################3
@@ -717,8 +818,9 @@ def main(argv):
   del argv
   # tf.enable_resource_variables()
 
-  # tf.disable_eager_execution()
-  tf.config.run_functions_eagerly(True)
+  # tf.config.optimizer.set_jit("autoclustering")
+  tf.config.run_functions_eagerly(FLAGS.eager)
+
 
   global LEN_TRAJ
   utils.check_consistencies(FLAGS)
@@ -749,6 +851,13 @@ def main(argv):
 
   # learned_model = core_model.SimplifiedNetwork() # for mlp
 
+  #### Set up mixed precision
+  # support_modes = snt.mixed_precision.modes([tf.float32, tf.float16])
+  # core_model.EncodeProcessDecode.__call__ = support_modes(core_model.EncodeProcessDecode.__call__)
+  # snt.mixed_precision.enable(tf.float16)
+
+
+
 
   learned_model = core_model.EncodeProcessDecode(
       output_size=output_size,
@@ -756,13 +865,23 @@ def main(argv):
       num_layers=FLAGS.num_layers,
       message_passing_steps=FLAGS.message_passing_steps)
 
-  #### For debugging
-
-  ###
-
-
 
   model = params['model'].Model(learned_model, FLAGS)
+
+
+  # Try to make summary writer to visualize graph on tensorboard
+
+  # @tf.function 
+  # def my_fun(x):
+  #   return 2 * x
+
+  # a = tf.constant(10, tf.float32)
+  # writer = tf.summary.create_file_writer(FLAGS.checkpoint_dir)
+  # with writer.as_default():
+  #   tf.summary.graph(learned_model.__call__.get_concrete_function().graph)
+  #   # my_fun_graph = my_fun.get_concrete_function(a).graph
+  #   # tf.summary.graph(my_fun_graph)
+
 
 
   if FLAGS.mode == 'train':

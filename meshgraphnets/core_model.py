@@ -41,7 +41,6 @@ from meshgraphnets import common
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
 
-# class GraphNetBlock(snt.AbstractModule):
 class GraphNetBlock(snt.Module):
 
   """Multi-Edge Interaction Network with residual connections."""
@@ -78,7 +77,7 @@ class GraphNetBlock(snt.Module):
     return self._update_node_features_fn(tf.concat(features, axis=-1))
 
 
-  # @tf.function
+  @tf.function(jit_compile=True)
   def __call__(self, graph):
   # def _build(self, graph):
     """Applies GraphNetBlock and returns updated MultiGraph."""
@@ -162,6 +161,7 @@ class EncodeProcessDecode(snt.Module):
     """Encodes node and edge features into latent features."""
     # with tf.variable_scope('encoder'):
     # node_latents = self._make_mlp(self._latent_size)(graph.node_features)
+
     node_latents = self._node_latents_fn(graph.node_features)
 
     new_edges_sets = []
@@ -170,6 +170,7 @@ class EncodeProcessDecode(snt.Module):
       latent = edge_latent_fn(edge_set.features)
 
       new_edges_sets.append(edge_set._replace(features=latent))
+
 
     return MultiGraph(node_latents, new_edges_sets)
 
@@ -182,7 +183,7 @@ class EncodeProcessDecode(snt.Module):
     '''
     return self._decoder_fn(graph.node_features)
 
-  # @tf.function
+  @tf.function(jit_compile=True)
   def __call__(self, graph):
   # def _build(self, graph):
     """Encodes and processes a multigraph, and returns node features."""
@@ -202,49 +203,3 @@ class EncodeProcessDecode(snt.Module):
 
 
 
-'''
-class SimplifiedNetwork(snt.AbstractModule):
-
-  def __init__(self,
-               name='SimplifiedNetwork'):
-    super(SimplifiedNetwork, self).__init__(name=name)
-    self._latent_size = 2
-    self._num_layers = 10
-
-  def _make_mlp(self, output_size, layer_norm=False):
-    """Builds an MLP."""
-    # network = snt.nets.MLP([8, 16, 32, 8, 1], activate_final=False) # Used when input was just grippe rpos, force, and tfn
-    network = snt.nets.MLP([2000, 500, 30, 1], activate_final=False)
-    if layer_norm:
-      network = snt.Sequential([network, snt.LayerNorm()])
-    return network
-    # self.hidden1 = snt.Linear(8)
-    # self.hidden2 = snt.Linear(16)
-    # self.hidden3 = snt.Linear(32)
-    # self.hidden4
-
-
-  def _build(self, inputs):
-    simplified_mlp = self._make_mlp(1)
-    f_verts, _, _, _ = deforming_plate_model.gripper_world_pos(inputs)
-    f_verts_flattened = tf.reshape(f_verts, [-1, 1])
-
-    num_f_verts_total = 1180# tf.shape(f_verts)[0]
-    num_verts_total = tf.shape(inputs['mesh_pos'])[0]
-    pad_diff = num_verts_total - num_f_verts_total
-    paddings = [[0, pad_diff], [0, 0]]
-    finger_world_pos = tf.pad(f_verts, paddings, "CONSTANT")
-    actuator_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
-    world_pos = tf.where(actuator_mask, finger_world_pos, inputs['world_pos']) # This should be equal to inputs['world_pos'] anyway
-    world_pos_flattened = tf.reshape(world_pos, [-1, 1])
-
-
-    # mlp_inputs = tf.transpose(tf.concat([inputs['gripper_pos'], inputs['force'], inputs['tfn']], axis=0))
-    # mlp_inputs = tf.ensure_shape(mlp_inputs, [1, 1 + 1 + 6])
-
-
-    mlp_inputs = tf.transpose(tf.concat([inputs['force'], world_pos_flattened], axis=0))
-    mlp_inputs = tf.ensure_shape(mlp_inputs, [1, 1 + 2292*3])
-
-    return simplified_mlp(mlp_inputs)
-'''

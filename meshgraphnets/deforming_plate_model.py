@@ -18,14 +18,14 @@
 import os
 
 import sonnet as snt
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
 from tfdeterminism import patch
 # patch()
 SEED = 55
 os.environ['PYTHONHASHSEED'] = str(SEED)
 # random.seed(SEED)
-tf.set_random_seed(SEED)
+# tf.random.set_seed(SEED)
 
 
 import tensorflow_graphics.geometry.transformation as tfg_transformation
@@ -40,26 +40,12 @@ import numpy as np
 import os
 import trimesh
 
-def open_gripper_at_pose(inputs):
-  # Load original finger positions
-  finger1_path = os.path.join('meshgraphnets', 'assets', 'finger1_face_uniform' + '.stl')
-  f1_trimesh = trimesh.load_mesh(finger1_path)
-  f1_verts_original = tf.constant(f1_trimesh.vertices, dtype=tf.float32)
-
-  finger2_path = os.path.join('meshgraphnets', 'assets', 'finger2_face_uniform' + '.stl')
-  f2_trimesh = trimesh.load_mesh(finger2_path)
-  f2_verts_original = tf.constant(f2_trimesh.vertices, dtype=tf.float32)
-  f_pc_original = tf.concat((f1_verts_original, f2_verts_original), axis=0)
-
-
-
+def open_gripper_at_pose(inputs, f_pc_original):
+  ''' Transform original point cloud of the gripper to its pose.'''
   # Load transformation params (euler and translation)
   euler, trans = tf.split(inputs['tfn'][:,0], 2, axis=0)
 
-  # euler = tf.zeros(3)
-  # trans = tf.zeros(3)
   tf_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(euler)
-  # print(tf_from_euler)
   f_pc = tfg_transformation.rotation_matrix_3d.rotate(f_pc_original, tf_from_euler) + trans
   original_normal = tf.constant([1., 0., 0.], dtype=tf.float32)
   gripper_normal = tfg_transformation.rotation_matrix_3d.rotate(original_normal, tf_from_euler)
@@ -67,22 +53,25 @@ def open_gripper_at_pose(inputs):
 
   return f1_verts, f2_verts, gripper_normal
 
-def f_verts_at_pos(inputs, gripper_pos):
-  f1_verts, f2_verts, gripper_normal = open_gripper_at_pose(inputs)
+def f_verts_at_pos(inputs, gripper_pos, f_pc_original):
+  ''' Transform original point cloud of the gripper to its pose, then apply gripper_pos'''
+
+  # Get f_pc_original transformed to the pose, split into the two fingers
+  f1_verts, f2_verts, gripper_normal = open_gripper_at_pose(inputs, f_pc_original)
+
   f1_verts_closed = f1_verts -  gripper_normal * (0.04 - gripper_pos)
   f2_verts_closed = f2_verts + gripper_normal * (0.04 - gripper_pos)
   f_verts = tf.concat((f1_verts_closed, f2_verts_closed), axis=0)
-  return f_verts
+
+  return f_verts, gripper_normal
 
 
-def gripper_world_pos(inputs):
 
-  f1_verts, f2_verts, gripper_normal = open_gripper_at_pose(inputs) # Might not need this line
+def gripper_world_pos(inputs, f_pc_original):
 
   # Apply gripper closings to the transformed fingers
-  f_verts = f_verts_at_pos(inputs, inputs['gripper_pos'])
-
-  f_verts_next = f_verts_at_pos(inputs, inputs['target|gripper_pos'])
+  f_verts, gripper_normal = f_verts_at_pos(inputs, inputs['gripper_pos'], f_pc_original)
+  f_verts_next, _ = f_verts_at_pos(inputs, inputs['target|gripper_pos'], f_pc_original)
 
   # Get velocity of each gripper
   num_verts_per_f = f_verts.shape[0] // 2
@@ -97,12 +86,119 @@ def gripper_world_pos(inputs):
 
   return f_verts, f_verts_next, f_force_vecs, unit_f_force_vecs
 
-  #########################
 
-  # f_pc = np.concatenate((f1_verts_original, f2_verts_original))
+def gripper_world_pos_projection(inputs, f_pc_original):
+  ''' Given initial gripper orientation, infer the initial gripper pos at contact '''
+  f1_verts, f2_verts, gripper_normal = open_gripper_at_pose(inputs, f_pc_original) # Might not need this line
+
+  # Apply gripper closings to the transformed fingers
+  f_verts_open = f_verts_at_pos(inputs, 0.04, f_pc_original)
+
+  f_verts_next = f_verts_at_pos(inputs, inputs['target|gripper_pos'], f_pc_original)
 
 
 
+  def project_to_normal(normal, pos):
+    perp_dists = np.dot(pos, normal)
+    return pos - normal * perp_dists[:, None]
+
+
+  def idx_in_rect(pos, corners):
+    A, B, C, D  = corners
+
+
+    AB = B - A 
+    AD = D - A
+
+    AM = pos - A
+    inside_idx = np.where((np.dot(AM, AB) < np.dot(AB, AB)) & (0 < np.dot(AM, AB)) & (np.dot(AM, AD) < np.dot(AD, AD)) & (0 < np.dot(AM, AD)))
+    # idx2 = np.where((np.dot(AM, AD) < np.dot(AD, AD)) & (0 < np.dot(AM, AD)))
+
+    return inside_idx
+
+  def gripper_pos_at_contact(points_in_rect, normal, p1, p2):
+    # Closest to p1
+    f1_closest_dist = np.min(np.dot(points_in_rect - p1, -1. * normal))
+    f2_closest_dist = np.min(np.dot(points_in_rect - p2, normal))
+
+    return 0.04 - min(f1_closest_dist, f2_closest_dist)
+
+
+
+
+  ###############
+  import matplotlib.pyplot as plt 
+  fig = plt.figure(figsize=(8,8))
+  ax = fig.add_subplot(111, projection='3d')
+
+
+  corner_idx1 = [43, 23, 8, 28] # Corners 
+  p1_idx, p2_idx = 143, 1036
+  corner_idx2 = [1167, 1147, 1132, 1152] # For face 2
+
+
+  actuator_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
+  object_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.AIRFOIL)
+  gt_gripper = tf.gather(inputs['world_pos'], tf.squeeze(tf.where(actuator_mask)))
+  gt_mesh = tf.gather(inputs['world_pos'], tf.squeeze(tf.where(object_mask)))
+
+
+  # Project points onto the gripper normal
+  idx_in_rect = idx_in_rect(project_to_normal(gripper_normal, gt_mesh).numpy(), project_to_normal(gripper_normal, f_verts_open).numpy()[corner_idx1, :])
+  points_in_rect = gt_mesh.numpy()[idx_in_rect]
+
+  contact_gripper_pos = gripper_pos_at_contact(points_in_rect, gripper_normal, f_verts_open[p1_idx], f_verts_open[p2_idx])
+  f_verts_at_contact = f_verts_at_pos(inputs, contact_gripper_pos)
+
+
+  Xg, Yg, Zg = gt_gripper.numpy().T 
+  Xm, Ym, Zm = gt_mesh.numpy().T #project_to_normal(gripper_normal, gt_mesh).numpy().T 
+  X, Y, Z = f_verts_at_contact.numpy().T #project_to_normal(gripper_normal, f_verts).numpy().T #f_verts.numpy().T
+  Xf, Yf, Zf = project_to_normal(gripper_normal, f_verts_open).numpy()[corner_idx1 + corner_idx2, :].T
+
+
+  ax.scatter(Xm, Ym, Zm)
+  ax.scatter(Xg, Yg, Zg)
+  ax.scatter(X, Y, Z)
+  ax.scatter(Xf, Yf, Zf, s = 100)
+
+  max_range = np.array([X.max()-X.min(), Y.max()-Y.min(), Z.max()-Z.min()]).max() / 2.0
+
+  mid_x = (X.max()+X.min()) * 0.5
+  mid_y = (Y.max()+Y.min()) * 0.5
+  mid_z = (Z.max()+Z.min()) * 0.5
+  ax.set_xlim(mid_x - max_range, mid_x + max_range)
+  ax.set_ylim(mid_y - max_range, mid_y + max_range)
+  ax.set_zlim(mid_z - max_range, mid_z + max_range)
+  ax.set_xlabel('x')
+  ax.set_ylabel('y')
+  ax.set_zlabel('z')
+
+  plt.show()
+  quit()
+  #############
+
+
+  return f_verts_at_contact
+
+traj_len = None
+signature_dict = {"cells": tf.TensorSpec(shape=[traj_len, None, 4], dtype=tf.int32, name="cells"),
+                  "force": tf.TensorSpec(shape=[traj_len, 1, 1], dtype=tf.float32, name="force"),
+                  "gripper_pos": tf.TensorSpec(shape=[traj_len, 1, 1], dtype=tf.float32, name="gripper_pos"),
+                  "mesh_edges": tf.TensorSpec(shape=[traj_len, None, 2], dtype=tf.int32, name="mesh_edges"),
+                  "mesh_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="mesh_pos"),
+                  "node_mod": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="node_mod"),
+                  "node_type": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.int32, name="node_type"),
+                  "pd_stress": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="pd_stress"),
+                  "sim_world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="sim_world_pos"),
+                  "stress": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="stress"),
+                  "target|force": tf.TensorSpec(shape=[traj_len, 1, 1], dtype=tf.float32, name="target|force"),
+                  "target|gripper_pos": tf.TensorSpec(shape=[traj_len, 1, 1], dtype=tf.float32, name="target|force"),
+                  "target|stress": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="target|stress"),
+                  "target|world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="target|world_pos"),
+                  "tfn": tf.TensorSpec(shape=[traj_len, 6, 1], dtype=tf.float32, name="tfn"),
+                  "world_edges": tf.TensorSpec(shape=[traj_len, None, 2], dtype=tf.int32, name="world_edges"),
+                  "world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="world_pos"),} 
 
 
 # @snt.allow_empty_variables
@@ -120,6 +216,7 @@ class Model(snt.Module):
     # with tf.variable_scope("foo"):
     self.FLAGS = FLAGS
     self._learned_model = learned_model
+    self.input_signature_dict = signature_dict
 
     ######### Output #########
     output_size = utils.get_output_size(self.FLAGS)
@@ -161,50 +258,60 @@ class Model(snt.Module):
         size=world_edge_feature_size, name='world_edge_normalizer') 
 
 
+    ### Get original finger positions
+    # Load original finger positions
+    finger1_path = os.path.join('meshgraphnets', 'assets', 'finger1_face_uniform' + '.stl')
+    f1_trimesh = trimesh.load_mesh(finger1_path)
+    f1_verts_original = tf.constant(f1_trimesh.vertices, dtype=tf.float32)
+
+    finger2_path = os.path.join('meshgraphnets', 'assets', 'finger2_face_uniform' + '.stl')
+    f2_trimesh = trimesh.load_mesh(finger2_path)
+    f2_verts_original = tf.constant(f2_trimesh.vertices, dtype=tf.float32)
+    self.f_pc_original = tf.concat((f1_verts_original, f2_verts_original), axis=0)
+
+
+
+
+
+  @tf.function(input_signature=[signature_dict])
   def accumulate_stats(self, inputs):
     initial_state = {k: v[0] for k, v in inputs.items()}
     self._build_graph(initial_state, is_training=True) # is_training here is = accumulate
+
     # Accumulate raw targets
     combined_target = self.get_output_targets(initial_state)
     self._output_normalizer(combined_target, accumulate=True)
 
+
   def _build_graph(self, inputs, is_training):
     """Builds input graph."""
 
-
+    # '''
     # Mask way non-kinematic nodes
-    actuator_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
+    actuator_mask = tf.expand_dims(tf.equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE), -1)
 
     #######################################################################################
     # Calculate world pos partially from gripper_pos
     if not utils.using_dm_dataset(self.FLAGS):
-      f_verts, f_verts_next, f_force_vecs, unit_f_force_vecs = gripper_world_pos(inputs) 
+      f_verts, f_verts_next, f_force_vecs, unit_f_force_vecs = gripper_world_pos(inputs, self.f_pc_original) 
       num_f_verts_total = tf.shape(f_verts)[0]
       num_verts_total = tf.shape(inputs['mesh_pos'])[0]
       pad_diff = num_verts_total - num_f_verts_total
       paddings = [[0, pad_diff], [0, 0]]
       finger_world_pos = tf.pad(f_verts, paddings, "CONSTANT")
-      world_pos = tf.where(actuator_mask, finger_world_pos, inputs['world_pos']) # This should be equal to inputs['world_pos'] anyway
+
+      # world_pos = tf.where(actuator_mask, finger_world_pos, inputs['world_pos']) # This should be equal to inputs['world_pos'] anyway
+      world_pos = tf.concat([f_verts, inputs['world_pos'][1180:, :]], axis=0)
+
 
     else:
     # If using full world pos directly
       world_pos = inputs['world_pos']
-      quit()
-
-    euler, trans = tf.split(inputs['tfn'][:,0], 2, axis=0)
-    # world_pos = tf.tile(trans, [1, 2292])
-    # world_pos = tf.where(actuator_mask, inputs['world_pos'] * trans[1], inputs['world_pos'])
-    # world_pos = inputs['world_pos']
-    # world_pos = inputs['mesh_pos']
-
-    # transform world pos by tfn
+    # '''
 
 
-    # tf_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(euler)
-    # world_pos = tfg_transformation.rotation_matrix_3d.rotate(tf.zeros([2292, 3]) + inputs['world_pos'], tf_from_euler) #+ trans
 
     ###################### Mesh edge features #########
-
     if utils.using_dm_dataset(self.FLAGS):
       senders, receivers = common.triangles_to_edges(inputs['cells'])
     else:
@@ -231,9 +338,7 @@ class Model(snt.Module):
         receivers=receivers,
         senders=senders)
 
-
     #################### World edge features #########
-
     if self.FLAGS.compute_world_edges:
       world_senders, world_receivers = common.construct_world_edges(world_pos, inputs['node_type'], self.FLAGS)
     else:
@@ -245,6 +350,7 @@ class Model(snt.Module):
       # Force at nodes or edges
       if self.FLAGS.node_total_force_t:
         force_label = inputs['force'][0,0] # Label every node/edge with total gripper force
+
       else:
         force_label = inputs['force'][0,0] / (0.5 * tf.cast(tf.shape(world_senders)[0], tf.float32)) # Label every node/world edge with total gripper force / num contacts
         force_change_label = (inputs['target|force'][0,0] - inputs['force'][0,0]) / (0.5 * tf.cast(tf.shape(world_senders)[0], tf.float32))
@@ -265,6 +371,7 @@ class Model(snt.Module):
           tf.fill(tf.shape(relative_world_norm), force_label)], axis=-1)
 
     elif self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node and self.FLAGS.simplified_predict_stress_change_only:
+
       if self.FLAGS.predict_stress_t_only:
         world_edge_features = tf.concat([
             relative_world_pos,
@@ -290,9 +397,9 @@ class Model(snt.Module):
 
     #################### Node features #########
     # Calculate force velocity from gripper_pos
-    # '''
-  
+
     # Use either change in force or change in gripper position as the velocity
+    # '''
     zero_vel = tf.fill(tf.shape(inputs['mesh_pos']), 0.0)
 
     if self.FLAGS.gripper_force_action_input:
@@ -310,7 +417,6 @@ class Model(snt.Module):
       nonzero_vel = inputs['target|world_pos'] - inputs['world_pos']
 
     velocity = tf.where(actuator_mask, nonzero_vel, zero_vel) 
-    # '''
 
     ##########
     node_type = tf.one_hot(inputs['node_type'][:, 0], common.NodeType.SIZE)
@@ -325,6 +431,7 @@ class Model(snt.Module):
       stresses = inputs['stress']
 
 
+
     if not utils.stress_t_as_node_feature(self.FLAGS):
       node_features = tf.concat([velocity, node_type], axis=-1)
     else:
@@ -334,13 +441,15 @@ class Model(snt.Module):
       node_force = tf.fill(tf.shape(inputs['stress']), force_label)
       node_features = tf.concat([node_force, node_features], axis=-1)
 
+    # '''
+
 
     return core_model.MultiGraph(
         node_features=self._node_normalizer(node_features, is_training),
-        edge_sets=[mesh_edges, world_edges]), 2
+        edge_sets=[mesh_edges, world_edges])
+
 
   # Is this used? Yes in the background of AbstractModel
-  # @tf.function
   def __call__(self, inputs, normalize=True, accumulate=False):
 
   # def _build(self, inputs, normalize=True, accumulate=False):
@@ -353,7 +462,7 @@ class Model(snt.Module):
 
 
 
-    graph, grad_debugs = self._build_graph(inputs, is_training=False)
+    graph = self._build_graph(inputs, is_training=False)
     per_node_network_output = self._learned_model(graph)
     return self._update(inputs, per_node_network_output, normalize, accumulate)
 
@@ -366,7 +475,7 @@ class Model(snt.Module):
     return tf.shape(inputs['node_type'])
 
 
-
+  # @tf.function works here!
   def get_output_targets(self, inputs):
     '''Get non-normalized targets from inputs'''
     # Target gripper pos change
@@ -405,7 +514,6 @@ class Model(snt.Module):
     return combined_target
 
   # @snt.reuse_variables
-  # @tf.function
   def loss(self, inputs, normalize=True, accumulate=False):
     """L2 loss on position."""
 
@@ -420,11 +528,9 @@ class Model(snt.Module):
     combined_target = self.get_output_targets(inputs)
 
     # Get prediction
-    graph, debug_val = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
-    # graph = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
+    graph = self._build_graph(inputs, is_training=accumulate) # is_training used to always be True -> accumulate always True
 
     network_output = self._learned_model(graph)
-
 
     # return network_output 
     if normalize:
@@ -445,7 +551,7 @@ class Model(snt.Module):
       object_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.NORMAL)
 
     else: # Else if ABC, we want to care about errors for soft nodes and surface nodes (0 and 2)
-        object_mask = tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
+      object_mask = tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
 
 
     # Normalize target position change and stress first
@@ -468,7 +574,13 @@ class Model(snt.Module):
     else:
       stress_target_normalized = target_normalized
 
-    stress_error = tf.reduce_sum((stress_target_normalized - stress_output)**2, axis=1) 
+
+    if self.FLAGS.loss_function.lower() == "mse":
+      stress_error = tf.reduce_sum((stress_target_normalized - stress_output)**2, axis=1) 
+    elif self.FLAGS.loss_function.lower() == "mae":
+      stress_error = tf.reduce_sum(tf.math.abs(stress_target_normalized - stress_output), axis=1) 
+    else:
+      assert(False)
     stress_loss = tf.reduce_mean(stress_error[object_mask])
 
 
@@ -497,14 +609,14 @@ class Model(snt.Module):
 
 
     """Integrate model outputs."""
-    actuator_mask = tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE) # Where nodes are NOT actuators
-    fixed_points = tf.equal(inputs['node_type'][:, 0], common.NodeType.HANDLE) # Where nodes ARE fixed
+    actuator_mask = tf.expand_dims(tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE), -1) # Where nodes are NOT actuators
+    fixed_points = tf.expand_dims(tf.equal(inputs['node_type'][:, 0], common.NodeType.HANDLE), -1) # Where nodes ARE fixed
     actuator_idx = tf.where(actuator_mask)
 
     if not utils.using_dm_dataset(self.FLAGS):
 
       # '''
-      f_verts, f_verts_next, _, _ = gripper_world_pos(inputs)
+      f_verts, f_verts_next, _, _ = gripper_world_pos(inputs, self.f_pc_original)
       num_f_verts_total = 1180 # tf.shape(f_verts)[0]
       num_verts_total = tf.shape(inputs['mesh_pos'])[0]
       pad_diff = num_verts_total - num_f_verts_total
@@ -524,9 +636,10 @@ class Model(snt.Module):
     if utils.predict_some_stress_only(self.FLAGS): # In this case
       stress_change = self._output_normalizer.inverse(per_node_network_output)
 
+
       if self.FLAGS.predict_stress_change_only or self.FLAGS.predict_stress_t_only:
         position_change = inputs['world_pos'] - inputs['world_pos'] # Zero position change
-        position_change = position_change_gt # JUST FOR NETWORK FOR GRIPPER_POS GRADIENTS
+        # position_change = position_change_gt # JUST FOR NETWORK FOR GRIPPER_POS GRADIENTS
       else:
         position_change = position_change_gt
     else:
@@ -570,7 +683,7 @@ class Model(snt.Module):
       next_stress_pred = stress_change
 
     # Removed just for gradient simplification 
-    # next_stress_pred = tf.nn.relu(next_stress_pred)
+    next_stress_pred = tf.nn.relu(next_stress_pred)
 
     # round to nearest next_gripper_pos
     gripper_vert_pos_change = tf.gather(position_change, actuator_idx)
