@@ -7,6 +7,8 @@ import math
 # Create command line flag options
 parser = argparse.ArgumentParser(description='Options')
 parser.add_argument('--checkpoint_dir', default='None', type=str)
+parser.add_argument('--start', default='0', type=int)
+parser.add_argument('--end', default=None, type=int)
 args = parser.parse_args()
 
 
@@ -50,17 +52,16 @@ for f_ind, folder in enumerate(folders):
 				baseline_stress_final_error = float(row[10])
 
 
-	# ax1.plot(train_losses, label="Train loss " + folder)
-	ax1.plot(test_losses, label="Test loss " + folder)
+
+	ax1.plot(test_losses[args.start:args.end], label="Test loss " + folder)
 	ax1.legend()
-	K = 150
-	ax2.plot(train_losses[:], label="Train loss " + folder, color=colors[f_ind])
+	ax2.plot(train_losses[args.start:args.end], label="Train loss " + folder, color=colors[f_ind])
 	ax2.set_title("Train losses")
 	ax2.legend()
 
 	plt.figure(3)
-	plt.plot(test_pos_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
-	plt.plot(test_pos_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
+	plt.plot(test_pos_mean_errors[args.start:args.end], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
+	plt.plot(test_pos_final_errors[args.start:args.end], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
 	plt.ylabel("Error [m]")
 	if baseline_pos_mean_error and baseline_pos_final_error:
 		plt.plot([baseline_pos_mean_error] * len(test_pos_mean_errors), color='gray')
@@ -70,8 +71,8 @@ for f_ind, folder in enumerate(folders):
 
 	# '''
 	plt.figure(4)
-	plt.plot(test_stress_mean_errors[:], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
-	plt.plot(test_stress_final_errors[:], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
+	plt.plot(test_stress_mean_errors[args.start:args.end], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
+	plt.plot(test_stress_final_errors[args.start:args.end], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
 	plt.ylabel("Error [Pa]")
 	if baseline_stress_mean_error and baseline_stress_final_error:
 		plt.plot([baseline_stress_mean_error] * len(test_stress_mean_errors), color='gray')

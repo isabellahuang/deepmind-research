@@ -96,12 +96,25 @@ def main(unused_argv):
   with open(FLAGS.rollout_path, 'rb') as fp:
     rollout_data = pickle.load(fp)
 
+
+
+
+
   fig = plt.figure(figsize=(8, 8))
   ax = fig.add_subplot(111, projection='3d')
   skip = 5
   num_steps = rollout_data[0]['gt_pos'].shape[0]
   num_frames = len(rollout_data) * num_steps // skip
 
+
+
+  # Convert everything to numpy
+  for ri in range(len(rollout_data)):
+    for key in rollout_data[ri]:
+      try:
+        rollout_data[ri][key] = rollout_data[ri][key].numpy()
+      except:
+        rollout_data[ri][key] = rollout_data[ri][key]
 
   # compute bounds
   bounds = []
@@ -110,7 +123,9 @@ def main(unused_argv):
     bb_max = trajectory['gt_pos'].max(axis=(0, 1))
     bounds.append((bb_min, bb_max))
 
-  E, v = 5e4, 0.3
+
+
+  E, v = 5e6, 0.3
 
   # Prism
   sorted_R_list = [29, 78, 75, 80, 98, 37, 35, 51, 20, 65, 24, 47, 8, 60, 19, 59, 14, 9, 46, 6, 96, 44, 64, 38, 91, 85, 87, 36, 12, 88, 49, 86, 10, 79, 45, 27, \
@@ -120,9 +135,9 @@ def main(unused_argv):
 
   def animate(num):
 
-
     step = (num*skip) % num_steps
     traj = (num*skip) // num_steps
+
 
     # If plotting sorted total rotation
     # traj = sorted_R_list[traj]
@@ -152,12 +167,14 @@ def main(unused_argv):
     stress = np.copy(rollout_data[traj]['pred_stress'][step])
 
     gt_pos = np.copy(rollout_data[traj]['gt_pos'][step])
+    gt_sim_pos = np.copy(rollout_data[traj]['sim_world_pos'][step])
+
     gt_stress = np.copy(rollout_data[traj]['gt_stress'][step])
 
     if not dm_dataset:
       gt_force = np.copy(rollout_data[traj]['gt_force'][step])
       gt_pd_stress = np.copy(rollout_data[traj]['gt_pd_stress'][step])
-      world_edges = np.copy(rollout_data[traj]['world_edges'][step])
+      # world_edges = np.copy(rollout_data[traj]['world_edges'][step])
 
 
 
@@ -171,15 +188,15 @@ def main(unused_argv):
     gt_stress[gt_positive_idx] = np.exp(gt_stress[gt_positive_idx]) - 1
     '''
 
-
-    print("===", step, np.min(stress), np.max(stress), np.max(gt_stress))
+    # print("{:3d} {:4f} {:8f} {:8f}".format(step, gt_force[0][0], np.max(stress), np.max(gt_stress)))
+    # print("===", step, gt_force[0][0], np.min(stress), np.max(stress), np.max(gt_stress))
 
     faces = rollout_data[traj]['faces'][step]
 
-    vmax = np.max(stress)
-    vmin = np.min(stress)
+    vmax = np.max(rollout_data[traj]['pred_stress'])#np.max(stress)
+    vmin = np.min(rollout_data[traj]['pred_stress'])# np.min(stress)
 
-    gt_vmax = np.exp(np.max(rollout_data[traj]['gt_stress'])) - 1
+    gt_vmax = np.max(rollout_data[traj]['gt_stress'])
     gt_vmin = np.min(rollout_data[traj]['gt_stress'])
 
     # '''
@@ -232,18 +249,22 @@ def main(unused_argv):
 
     node_type = np.copy(rollout_data[traj]['node_type'][0])
 
-    # mesh_senders, mesh_receivers = construct_world_edges(tf.convert_to_tensor(gt_pos), tf.convert_to_tensor(node_type))
 
 
 
     tets = np.copy(rollout_data[traj]['faces'][step])
-    mesh_pos = np.copy(rollout_data[traj]['gt_pos'][0])
-    curr_pos = np.copy(rollout_data[traj]['pred_pos'][step])
+    mesh_pos = np.copy(rollout_data[traj]['mesh_pos'][0])
 
 
     tet_object = dcu.TetObject(E, v, tets, mesh_pos)
-    pd_stress = tet_object.get_pd_vertex_stresses(curr_pos)
-    # gt_pd_stress = tet_object.get_pd_vertex_stresses(gt_pos)
+    # pd_stress = tet_object.get_pd_vertex_stresses(mesh_pos)
+    # gt_pd_stress_calc = tet_object.get_pd_vertex_stresses(gt_sim_pos)
+
+
+    # print(gt_stress, gt_pd_stress.shape, gt_pd_stress_calc[:100])
+    # quit()
+
+    print("===", step, gt_force[0][0], np.mean(gt_stress[1180:]), np.mean(gt_pd_stress[1180:]))
 
 
 
@@ -251,40 +272,43 @@ def main(unused_argv):
       # print("*******", np.mean(gt_pd_stress), np.mean(pd_stress), np.mean(gt_stress))      
       gripper_normal = dcu.get_gripper_normal(mesh_pos, np.copy(rollout_data[traj]['gt_pos'][-1]))
 
-      # pd_force = tet_object.get_total_surface_force(curr_pos, world_edges, gripper_normal)
-      gt_pd_force = tet_object.get_total_surface_force(gt_pos, world_edges, gripper_normal)
+      # gt_pd_force = tet_object.get_total_surface_force(gt_pos, world_edges, gripper_normal)
 
-      # vertex_forces = tet_object.vertex_forces_from_tris(curr_pos, world_edges, gripper_normal)
-      gt_vertex_forces = tet_object.vertex_forces_from_tris(gt_pos, world_edges, gripper_normal)
+      # gt_vertex_forces = tet_object.vertex_forces_from_tris(gt_pos, world_edges, gripper_normal)
 
-      print(gt_pd_force, gt_force)
       # '''
 
     ######################
 
 
-
-    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
-    # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=gt_stress[:], vmin=gt_vmin, vmax=gt_vmax)
-    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=pd_stress[:])
-    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_pd_stress[:])
-
-    ##################
-    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_vertex_forces[:])
-
-    # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=pd_stress[:])
-    X, Y, Z  = pos[:, 0], pos[:, 1], pos[:, 2]
-    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:])
+    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
+    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
+    # ax.scatter(gt_sim_pos[:, 0], gt_sim_pos[:, 1], gt_sim_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
 
 
-    # Plot mesh edges
-    # for p, q in zip(mesh_senders, mesh_receivers):
-      # ax.plot([X[p], X[q]], [Y[p], Y[q]], [Z[p], Z[q]], 'ro-')
+
+    # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=vmax)
+
+
 
     ax.set_title('Trajectory %d Step %d' % (traj, step))
     return fig,
 
-  _ = animation.FuncAnimation(fig, animate, frames=num_frames, interval=100)
+  # See stress dist
+  '''
+  plt.figure()
+  traj_ind = 44
+  step_ind = -1
+  stress = np.copy(rollout_data[traj_ind]['pred_stress'][step_ind])
+  gt_stress = np.copy(rollout_data[traj_ind]['gt_stress'][step_ind])
+  plt.hist(gt_stress, alpha=0.5)
+  plt.hist(stress, alpha=0.5)
+  plt.show()
+  '''
+
+
+
+  _ = animation.FuncAnimation(fig, animate, frames=num_frames, interval=1000)
   plt.show(block=True)
 
   dm_dataset = 'gt_force' not in trajectory.keys()
@@ -302,8 +326,8 @@ def main(unused_argv):
   gripper_displacements = []
 
 
- 
   for t_idx, trajectory in enumerate(rollout_data[:]):
+
     print(t_idx)
     tets = np.copy(trajectory['faces'][0])
     mesh_pos = np.copy(trajectory['gt_pos'][0])
@@ -311,7 +335,8 @@ def main(unused_argv):
     first_pos = np.copy(trajectory['pred_pos'][0])
     final_pos = np.copy(trajectory['pred_pos'][-1])
     gt_final_force = np.copy(trajectory['gt_force'][-1][0][0])
-    final_world_edges = np.copy(trajectory['world_edges'][-1])
+    # final_world_edges = np.copy(trajectory['world_edges'][-1])
+
 
     first_gripper_pos = np.copy(trajectory['gt_gripper_pos'][0])
     final_gripper_pos = np.copy(trajectory['gt_gripper_pos'][-1])
@@ -349,14 +374,14 @@ def main(unused_argv):
     
 
     gripper_normal = dcu.get_gripper_normal(mesh_pos, gt_final_pos)
-    # gt_final_pd_force = dcu.get_total_surface_force(E, v, mesh_pos, gt_final_pos, tets, final_world_edges, gripper_normal)
-    gt_final_pd_force = tet_object.get_total_surface_force(gt_final_pos, final_world_edges, gripper_normal)
-    gt_final_pd_forces.append(gt_final_force)
+
+    #Temporarily got rid of world edges
+    # gt_final_pd_force = tet_object.get_total_surface_force(gt_final_pos, final_world_edges, gripper_normal)
+    # gt_final_pd_forces.append(gt_final_force)
 
     
-    # final_pd_force = dcu.get_total_surface_force(E, v, mesh_pos, final_pos, tets, final_world_edges, gripper_normal)
-    final_pd_force = tet_object.get_total_surface_force(final_pos, final_world_edges, gripper_normal)
-    final_pd_forces.append(gt_final_pd_force)
+    # final_pd_force = tet_object.get_total_surface_force(final_pos, final_world_edges, gripper_normal)
+    # final_pd_forces.append(gt_final_pd_force)
 
     ### Histograms of stress
     # plt.hist(final_pd_stress, alpha=0.5)
@@ -375,7 +400,7 @@ def main(unused_argv):
   final_pd_stresses_maxes = [np.max(k) for k in final_pd_stresses]
   final_stresses_means = [np.mean(k) for k in final_stresses]
   final_stresses_maxes = [np.max(k) for k in final_stresses]
-  n_train = 40
+  n_train = 50
 
 
   fig, axs = plt.subplots(2, 4)
@@ -436,6 +461,7 @@ def main(unused_argv):
 
 
   ###### Gt final pd force ve pred final pd force
+  '''
   axs[0,3].scatter(gt_final_pd_forces[:n_train], final_pd_forces[:n_train], label="Training set")
   axs[0,3].scatter(gt_final_pd_forces[n_train:], final_pd_forces[n_train:], label="Validation set")
   axs[0,3].legend()
@@ -443,6 +469,7 @@ def main(unused_argv):
   axs[0,3].set_xlabel("Ground truth")
   axs[0,3].set_ylabel("Predicted")
   axs[0,3].set_title("Gt vs. predicted final pd force")
+  '''
 
 
   # plt.figure()

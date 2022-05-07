@@ -51,11 +51,12 @@ class Normalizer(snt.Module):
 
 
   # def _build(self, batched_data, accumulate=False): # Used to be True by default
-  # @tf.function
+  # @tf.function(jit_compile=True)
   def __call__(self, batched_data, accumulate=False): # Used to be True by default
 
     """Normalizes input data and accumulates statistics."""
     # update_op = tf.no_op()
+    
     if accumulate and self._num_accumulations < self._max_accumulations:
       self._accumulate(batched_data)
       # stop accumulating after a million updates, to prevent accuracy issues
@@ -64,6 +65,7 @@ class Normalizer(snt.Module):
       #                     tf.no_op)
     # with tf.control_dependencies([update_op]):
       # return (batched_data - self._mean()) / self._std_with_epsilon()
+      return (batched_data - self._mean()) / self._std_with_epsilon()
     else:
       return (batched_data - self._mean()) / self._std_with_epsilon()
 
@@ -92,9 +94,3 @@ class Normalizer(snt.Module):
     safe_count = tf.maximum(self._acc_count, 1.)
     std = tf.sqrt(self._acc_sum_squared / safe_count - self._mean()**2)
     return tf.math.maximum(std, self._std_epsilon)
-
-  #snt
-  # def __call__(self, batched_data, accumulate=False):
-  #   return self._build(batched_data, accumulate=False)
-
-

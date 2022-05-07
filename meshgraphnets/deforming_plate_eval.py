@@ -151,7 +151,7 @@ def refine_inputs(model, inputs, FLAGS, grad_data, custom_constant=0):
 
 
 def gripper_pos_at_first_contact(inputs, f_pc_original):
-  import numpy as np
+  # import numpy as np
   ''' Given initial gripper orientation, infer the initial gripper pos at contact '''
 
   # Apply gripper closings to the transformed fingers
@@ -207,7 +207,6 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
 
 
 
-
 def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=False, tfn=0, eval_step=0, force=0):
   """Performs model rollouts and create stats."""
 
@@ -217,50 +216,11 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
   initial_state = {k: v[0] for k, v in inputs.items()}
   initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
-  ################### WE HAVE SET INITIAL STATE TO STEP 20
+
 
   if not num_steps:
     num_steps = inputs['cells'].shape[0] # Length of trajectory
 
-
-  ############################################
-  # Instead of doing a whole rollout, do just one prediction for gradient debugging
-  '''
-
-  # initial_state['force'] = inputs['force'][20] 
-  # initial_state['gripper_pos'] = inputs['gripper_pos'][20] 
-  # initial_state['world_pos'] = inputs['world_pos'][20]
-
-  if tfn != 0:
-    initial_state['tfn'] = initial_state['tfn'] * 0 + tfn
-    # initial_state['force'] = initial_state['force'] * 0 + tfn
-    # initial_state['gripper_pos'] = initial_state['gripper_pos'] * 0 + tfn
-
-
-  next_pos_pred, next_stress_pred, loss_val = model(initial_state, normalize, accumulate)
-
-  scalars, traj_ops = {}, {}
-
-  # Full trajectory
-
-  traj_ops['mean_pred_stress'] = tf.reduce_mean(next_stress_pred)
-  traj_ops['pred_stress'] = next_stress_pred
-
-  traj_ops['loss_val'] = loss_val
-  traj_ops['pred_pos'] = next_pos_pred
-  traj_ops['world_pos'] = initial_state['world_pos']
-  traj_ops['gripper_pos'] = initial_state['gripper_pos']
-  traj_ops['mesh_edges'] = initial_state['mesh_edges']
-  traj_ops['force'] = initial_state['force']
-  traj_ops['tfn'] = initial_state['tfn']
-  traj_ops['world_edges'] = initial_state['world_edges']
-  traj_ops['inputs'] = inputs
-  traj_ops['inside_grad'] = tf.gradients(traj_ops['mean_pred_stress'], traj_ops['gripper_pos'], stop_gradients=[traj_ops['world_pos']])
-
-  return loss_val, traj_ops, scalars
-  '''
-
-  ##############################################
 
 
   # ##### FOR MEMORY SAKE. DELETE AFTER

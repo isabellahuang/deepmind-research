@@ -41,7 +41,7 @@ def _parse(proto, meta):
   features = tf.io.parse_single_example(proto, feature_lists)
   out = {}
   for key, field in meta['features'].items():
-    print("=====", key, field)
+    print("#####", key, field)
     data = tf.io.decode_raw(features[key].values, getattr(tf, field['dtype']))
     data = tf.reshape(data, field['shape'])
     if field['type'] == 'static':
@@ -109,9 +109,14 @@ def load_dataset(path, split, num_objects):
   print("Tfrecords_files", tfrecords_files)
   ds = tf.data.TFRecordDataset(tfrecords_files)
 
-  ds = ds.map(functools.partial(_parse, meta=meta), num_parallel_calls=1)
+  ds = ds.map(functools.partial(_parse, meta=meta), num_parallel_calls=tf.data.AUTOTUNE)
   ds = ds.prefetch(1)
   return ds
+
+
+
+
+
 
 def add_targets(ds, FLAGS, fields, add_history):
   """Adds target and optionally history fields to dataframe."""
@@ -122,12 +127,17 @@ def add_targets(ds, FLAGS, fields, add_history):
       if "stress" in key:
         val = tf.nn.relu(val)
 
-      '''
-      if FLAGS.gripper_force_action_input and key in ["gripper_pos", "world_pos"]:
-        val_len = tf.shape(val)[0]
+      # '''
+      # if FLAGS.gripper_force_action_input and key in ["gripper_pos"]: # This value should never be used bc written over later
+
+      if FLAGS.gripper_force_action_input and key in ["world_pos"]:
+        # Save simulated world pos first, as ground truth of real positions
+        out['sim_world_pos'] = val[1:-1]
+        val_len = val.shape[0] #tf.shape(val)[0]
         first_elem = tf.expand_dims(val[0], axis=0)
         val = tf.tile(first_elem, [val_len, 1, 1])
-      '''
+
+      # '''
 
       out[key] = val[1:-1]
       
@@ -140,7 +150,7 @@ def add_targets(ds, FLAGS, fields, add_history):
         else:
           out['target|'+key] = val[2:] # Either [1:] for full traj or [2:]
     return out
-  return ds.map(fn, num_parallel_calls=1)
+  return ds.map(fn, num_parallel_calls=tf.data.AUTOTUNE)
 
 
 def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
@@ -157,7 +167,7 @@ def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
     return frame
 
   ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)
-  ds = ds.map(add_noise, num_parallel_calls=1)
+  ds = ds.map(add_noise, num_parallel_calls=tf.data.AUTOTUNE)
 
   ds = ds.repeat(num_epochs)
   ds = ds.shuffle(5000) # This is the size of the shuffle buffer
@@ -171,6 +181,23 @@ def batch_dataset(ds, batch_size):
   shapes = ds.output_shapes
   types = ds.output_types
 
+  ################aaaaaaaaaaaaaaaaaaaaaaaaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  # return ds.batch(5) # You need window to give you control
+
+  def my_batch_accumulate(ds_window):
+    out = {}
+    print("-----")
+    for key, ds_val in ds_window.items():
+      print(key, ds_val)
+      out[key] = ds_val
+    return out
+  ds =  ds.window(5, drop_remainder=True)
+  ds = ds.map(my_batch_accumulate)
+  return ds 
+
+
+  ##############
+
   def renumber(buffer, frame):
     nodes, cells = buffer
     new_nodes, new_cells = frame
@@ -179,8 +206,12 @@ def batch_dataset(ds, batch_size):
   def batch_accumulate(ds_window):
     out = {}
     for key, ds_val in ds_window.items():
+
+
       initial = tf.zeros((0, shapes[key][1]), dtype=types[key])
+
       if key in ['cells', 'mesh_edges', 'world_edges']:
+
         # renumber node indices in cells
         num_nodes = ds_window['node_type'].map(lambda x: tf.shape(x)[0])
         cells = tf.data.Dataset.zip((num_nodes, ds_val))
@@ -192,5 +223,5 @@ def batch_dataset(ds, batch_size):
     return out
   if batch_size > 1:
     ds = ds.window(batch_size, drop_remainder=True)
-    ds = ds.map(batch_accumulate, num_parallel_calls=1)
+    ds = ds.map(batch_accumulate, num_parallel_calls=tf.data.AUTOTUNE)
   return ds

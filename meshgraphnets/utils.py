@@ -3,7 +3,6 @@ from scipy.spatial.transform import Rotation as R
 import os
 import trimesh
 
-
 def get_output_size(FLAGS):
 	if predict_some_stress_only(FLAGS):
 		return 1 
@@ -36,6 +35,11 @@ def get_global_deformation_metrics(undeformed_mesh, deformed_mesh, get_field=Fal
 
     Involves separating the pure deformation field from the raw displacement field.
     """
+
+    # # Convert to numpy
+    # undeformed_mesh = undeformed_mesh.numpy()
+    # deformed_mesh = deformed_mesh.numpy()
+
     num_nodes = undeformed_mesh.shape[0]
     undeformed_positions = undeformed_mesh[:, :3]
     deformed_positions = deformed_mesh[:, :3]
@@ -43,11 +47,15 @@ def get_global_deformation_metrics(undeformed_mesh, deformed_mesh, get_field=Fal
     centered_undeformed_positions = undeformed_positions - np.mean(undeformed_positions, axis=0)
     centered_deformed_positions = deformed_positions - np.mean(undeformed_positions, axis=0)
 
+
     # Extract deformations by rigid body motion
     axis_angle, t = rigid_body_motion(centered_undeformed_positions, centered_deformed_positions)
     rot = R.from_rotvec(axis_angle)
+
+
     aligned_deformed_positions = centered_deformed_positions
     for i in range(num_nodes):
+
         aligned_deformed_positions[i, :] = np.linalg.inv(
             rot.as_matrix()) @ (centered_deformed_positions[i, :] - t)
     centered_deformed_positions = aligned_deformed_positions
@@ -121,12 +129,6 @@ def open_gripper_at_pose(tfn):
   gripper_normal = tf_from_euler.apply(original_normal)
   f1_verts, f2_verts = np.split(f_pc, 2, axis=0)
 
-
-  # tf_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(euler)
-  # f_pc = tfg_transformation.rotation_matrix_3d.rotate(f_pc_original, tf_from_euler) + trans
-  # original_normal = tf.constant([1., 0., 0.], dtype=tf.float32)
-  # gripper_normal = tfg_transformation.rotation_matrix_3d.rotate(original_normal, tf_from_euler)
-  # f1_verts, f2_verts = tf.split(f_pc, 2, axis=0)
 
   return f1_verts, f2_verts, gripper_normal
 

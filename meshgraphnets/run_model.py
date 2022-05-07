@@ -187,6 +187,7 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None):
       shifted_lists = []
       for i in range(LEN_TRAJ - n_horizon + 1):
         shifted_list = tf.roll(val, shift=-i, axis=0)
+        # shifted_lists.append(shifted_list)
         shifted_lists.append(shifted_list[:n_horizon])
 
 
@@ -229,7 +230,7 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None):
 
   ds = ds.shuffle(500)
 
-  ds = dataset.batch_dataset(ds, 5)
+  # ds = dataset.batch_dataset(ds, 5)
 
   return ds.prefetch(tf.data.AUTOTUNE)
 
@@ -289,7 +290,7 @@ def learner(model, params):
   train_ds_with_outliers = get_flattened_dataset(train_ds_og, params, cutoff=None)
 
   # Scan training data for outliers in high stresses
-  '''
+  # '''
   if latest is None:
     print("Filtering out outliers")
 
@@ -305,15 +306,15 @@ def learner(model, params):
 
     except tf.errors.OutOfRangeError:
       pass
-  '''
+  # '''
   # Save this to dict per object name
-  percentile_cutoff = 1e9#tfp.stats.percentile(final_stresses, 97, interpolation='linear')
+  percentile_cutoff = tfp.stats.percentile(final_stresses, 97, interpolation='linear')
 
 
 
  
-  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=None) #percentile_cutoff
-  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=None) #percentile_cutoff
+  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff) #percentile_cutoff
+  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff) #percentile_cutoff
   test_ds = get_flattened_dataset(test_ds, params, cutoff=percentile_cutoff)
 
 
@@ -356,9 +357,9 @@ def learner(model, params):
       while True:
         inputs = iterator.get_next()
 
-        print(inputs['world_pos'])
+        # print(inputs['world_pos'])
 
-        # model.accumulate_stats(inputs)
+        model.accumulate_stats(inputs)
 
         num_train_dp += 1
         if num_train_dp % 1000 == 0:
@@ -371,7 +372,7 @@ def learner(model, params):
       pass
   # '''
   # print(model.accumulate_stats.pretty_printed_concrete_signatures())  
-  quit()
+  # quit()
   ########### Get distribution of all stresses seen during training
   '''
   iterator = iter(test_ds)
@@ -411,11 +412,9 @@ def learner(model, params):
     try:
       t0 = timeit.default_timer()
       while True:
-        # with tf.profiler.experimental.Trace('train', step_num=step, _r=1):
+      # with tf.profiler.experimental.Trace('my_train_step', step_num=step, _r=1):
         inputs = iterator.get_next()
         step += 1
-
-
 
         train_loss = train_step(inputs)
         train_losses.append(train_loss)
@@ -423,16 +422,12 @@ def learner(model, params):
         if step % 100 == 0:
           logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
 
-
-
     except tf.errors.OutOfRangeError:
       # with train_summary_writer.as_default():
         # tf.summary.scalar('train_loss', np.mean(train_losses), step=i)
       tnext = timeit.default_timer()
       print("------Time taken for epoch", i, ":", tnext - t0)
 
-
-      pass
 
     # print(train_step.pretty_printed_concrete_signatures())  
     continue
