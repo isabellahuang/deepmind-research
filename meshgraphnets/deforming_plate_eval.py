@@ -19,7 +19,7 @@ import os
 
 import tensorflow as tf
 
-from tfdeterminism import patch
+# from tfdeterminism import patch
 # patch()
 SEED = 55
 os.environ['PYTHONHASHSEED'] = str(SEED)
@@ -75,7 +75,7 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
       model_input_dict['target|gripper_pos'] = inputs['target|gripper_pos'][step]
 
 
-    next_pos_pred, next_stress_pred, loss_val = model(model_input_dict, normalize, accumulate)
+    next_pos_pred, next_stress_pred, loss_val = model(model_input_dict, False, normalize, accumulate)
 
 
 
@@ -155,11 +155,12 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
   ''' Given initial gripper orientation, infer the initial gripper pos at contact '''
 
   # Apply gripper closings to the transformed fingers
-  f_verts_open, gripper_normal = deforming_plate_model.f_verts_at_pos(inputs, 0.04, f_pc_original)
+
+  f_verts_open, gripper_normal = deforming_plate_model.f_verts_at_pos(inputs, [0.04, 0.04], f_pc_original)
 
   def project_to_normal(normal, pos):
 
-    # perp_dists = np.dot(pos, normal)
+
     perp_dists_tf = tf.tensordot(pos, normal, 1)
 
     return pos - normal * perp_dists_tf[:, None]
@@ -181,7 +182,8 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
     f1_closest_dist = tf.reduce_min(tf.tensordot(points_in_rect - p1, -1. * normal, 1))
 
     f2_closest_dist = tf.reduce_min(tf.tensordot(points_in_rect - p2, normal,1))
-    return 0.04 - tf.reduce_min(tf.stack([f1_closest_dist, f2_closest_dist])) #- 0.0005 # little bit of tolerance at the end
+    return tf.stack([0.04 - f1_closest_dist, 0.04 - f2_closest_dist])
+    # return 0.04 - tf.reduce_min(tf.stack([f1_closest_dist, f2_closest_dist]))
 
   corner_idx1 = [43, 23, 8, 28] # Corners 
   p1_idx, p2_idx = 143, 1036
@@ -190,8 +192,8 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
 
   actuator_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE)
   object_mask = tf.equal(inputs['node_type'][:, 0], common.NodeType.AIRFOIL)
-  gt_gripper = inputs['world_pos'][:1180, :] #tf.gather(inputs['world_pos'], tf.squeeze(tf.where(actuator_mask)))
-  gt_mesh = inputs['world_pos'][1180:, :] #tf.gather(inputs['world_pos'], tf.squeeze(tf.where(object_mask)))
+  gt_gripper = tf.gather(inputs['world_pos'], tf.squeeze(tf.where(actuator_mask)))
+  gt_mesh = tf.gather(inputs['world_pos'], tf.squeeze(tf.where(object_mask)))
 
 
   # Project points onto the gripper normal
@@ -200,11 +202,22 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
   contact_gripper_pos_tf = gripper_pos_at_contact_tf(points_in_rect_tf, gripper_normal, f_verts_open[p1_idx], f_verts_open[p2_idx])
 
   contact_gripper_pos_tf = tf.expand_dims(contact_gripper_pos_tf, axis=0)
-  contact_gripper_pos_tf = tf.expand_dims(contact_gripper_pos_tf, axis=0)
-
+  # contact_gripper_pos_tf = tf.expand_dims(contact_gripper_pos_tf, axis=0)
 
   return contact_gripper_pos_tf
 
+# loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
+@tf.function(jit_compile=False)
+def evaluate_one_step(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=False, tfn=0, eval_step=0, force=0):
+
+  # This should be replaced later, move this to the dataset processing
+  initial_state = {k: v[0] for k, v in inputs.items()}
+
+  # initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
+
+
+  next_pos_pred, next_stress_pred, loss_val = model(initial_state, True, normalize, accumulate)
+  return loss_val
 
 
 def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=False, tfn=0, eval_step=0, force=0):
@@ -215,8 +228,8 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   ####
 
   initial_state = {k: v[0] for k, v in inputs.items()}
-  initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
 
+  # initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
 
   if not num_steps:
     num_steps = inputs['cells'].shape[0] # Length of trajectory

@@ -21,7 +21,7 @@ import enum
 # import tensorflow.compat.v1 as tf
 import tensorflow as tf
 
-from tfdeterminism import patch
+# from tfdeterminism import patch
 # patch()
 SEED = 55
 os.environ['PYTHONHASHSEED'] = str(SEED)
@@ -48,21 +48,40 @@ class NodeType(enum.IntEnum):
 def sr_mesh_edges(mesh_edges):
   all_senders, all_receivers = tf.unstack(mesh_edges, axis=1)
 
+
+  ### This should work now, because non-unique mesh edges are removed in the h5 to tf
+  return (tf.concat([all_senders, all_receivers], axis=0),
+          tf.concat([all_receivers, all_senders], axis=0))
+
+  '''
   # Remove non-unique edges
   difference = tf.math.subtract(all_senders, all_receivers)
   unique_edge_idxs = tf.where(tf.not_equal(difference, 0))
 
+
   unique_mesh_edges = tf.gather(mesh_edges, unique_edge_idxs[:,0], axis=0)
+
   senders, receivers = tf.unstack(unique_mesh_edges, 2, axis=1)
 
   return (tf.concat([senders, receivers], axis=0),
           tf.concat([receivers, senders], axis=0))
+  '''
 
 def sr_world_edges(world_edges):
 
   all_senders, all_receivers = tf.unstack(world_edges, axis=1)
+
+
+  # JUST TO GET XLA TO WORK
+  return (tf.concat([all_senders, all_receivers], axis=0),
+          tf.concat([all_receivers, all_senders], axis=0))
+
+
+
   difference = tf.math.subtract(all_senders, all_receivers)
   unique_edges = tf.where(tf.not_equal(difference, 0))
+  
+  # print(world_edges.shape[0], unique_edges.shape[0])
 
   close_pair_idx = tf.gather(world_edges, unique_edges[:,0], axis=0)
 

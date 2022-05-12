@@ -20,6 +20,9 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
 os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
 os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
+os.environ['TF_CPP_VMODULE'] = 'asm_compiler=2'
+
+
 import pickle
 import sys
 
@@ -38,7 +41,7 @@ devices = tf.config.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(devices[0], True)
 
 
-from tfdeterminism import patch
+# from tfdeterminism import patch
 SEED = 55
 os.environ['PYTHONHASHSEED'] = str(SEED)
 np.random.seed(SEED)
@@ -145,7 +148,7 @@ LEN_TRAJ = 0
 
 
 
-def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None):
+def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None, batch=False):
   # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
   ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
   
@@ -179,22 +182,64 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None):
     ds = ds.filter(lambda ff: filter_func(ff, cutoff))
 
   # Shuffle trajectories selected for training
-  ds = ds.shuffle(500)
+  # ds = ds.shuffle(500)
 
   def repeat_and_shift(trajectory):
     out = {}
     for key, val in trajectory.items():
       shifted_lists = []
       for i in range(LEN_TRAJ - n_horizon + 1):
-        shifted_list = tf.roll(val, shift=-i, axis=0)
-        # shifted_lists.append(shifted_list)
-        shifted_lists.append(shifted_list[:n_horizon])
+        shifted_list = tf.roll(val, shift=-i, axis=0)[:n_horizon]
 
+
+        # if key in ["world_edges"]:
+        #   all_senders, all_receivers = tf.unstack(shifted_list, axis=-1)
+        #   # all_senders_ragged = tf.RaggedTensor.from_tensor(all_senders, padding=0)
+        #   all_senders_ragged = tf.RaggedTensor.from_tensor(all_senders)
+
+        #   # all_receivers_ragged = tf.RaggedTensor.from_tensor(all_receivers, padding=0)
+        #   all_receivers_ragged = tf.RaggedTensor.from_tensor(all_receivers)
+
+        #   shifted_list = tf.stack([all_senders_ragged, all_receivers_ragged], axis=-1)
+        #   shifted_list = shifted_list.with_row_splits_dtype(tf.int32)
+
+
+
+        shifted_lists.append(shifted_list)
 
       out[key] = shifted_lists
 
 
     return tf.data.Dataset.from_tensor_slices(out)
+
+
+  def my_map(frame):
+    val = frame['world_edges']
+    sum_across_row = tf.reduce_sum(val, axis=-1)
+
+    # all_senders, all_receivers = tf.unstack(val, axis=-1)
+    # difference = tf.math.subtract(all_senders, all_receivers)
+    unique_edges = tf.where(tf.not_equal(sum_across_row, 0))
+    close_pair_idx = tf.gather(val, unique_edges[:,1], axis=1)
+    val = close_pair_idx
+    frame['world_edges'] = val
+    return frame
+
+    '''
+    out = {}
+    for key, val in trajectory.items():
+      if key in ["world_edges"]:
+
+        all_senders, all_receivers = tf.unstack(val, axis=-1)
+        # difference = tf.math.subtract(all_senders, all_receivers)
+        # unique_edges = tf.where(tf.not_equal(difference, 0))
+        # close_pair_idx = tf.gather(val, unique_edges[:,1], axis=1)
+        # val = close_pair_idx
+
+      out[key] = val
+    return out#tf.data.Dataset.from_tensor_slices(out)
+
+    '''
 
 
   def use_pd_stress(frame):
@@ -224,15 +269,19 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None):
   if not test:
     ds =  ds.flat_map(repeat_and_shift)
 
+    # ds = ds.map(my_map, num_parallel_calls=tf.data.AUTOTUNE)
+
     # Add noise
-    ds = ds.map(add_noise, num_parallel_calls=8) #Used to be 8
+    ds = ds.map(add_noise, num_parallel_calls=tf.data.AUTOTUNE) #Used to be 8
 
 
-  ds = ds.shuffle(500)
+  # ds = ds.shuffle(500)
 
-  # ds = dataset.batch_dataset(ds, 5)
+  if batch:
+    ds = dataset.batch_dataset(ds, 5)
 
   return ds.prefetch(tf.data.AUTOTUNE)
+
 
 
 def evaluator_file_split():
@@ -241,6 +290,7 @@ def evaluator_file_split():
   train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
   train_files = [k for k in total_files if '00000007' in k] # circular disk
   train_files = [k for k in total_files if '00000016' in k] # rectangular prism
+
   train_files = [k for k in total_files if 'rectangle' in k] # rectangle dense grasps
 
   if utils.using_dm_dataset(FLAGS):
@@ -249,6 +299,17 @@ def evaluator_file_split():
   test_files = train_files
 
   return train_files, test_files
+
+def remove_zero_world_edges(inputs):
+  world_edges = inputs["world_edges"]
+  all_senders, all_receivers = tf.unstack(world_edges, axis=-1)
+  difference = tf.math.subtract(all_senders, all_receivers)
+
+  unique_edges = tf.where(tf.not_equal(difference, 0))
+
+  close_pair_idx = tf.gather(world_edges, unique_edges[:,1], axis=1)
+  inputs["world_edges"] = close_pair_idx
+  return inputs
 
 
 def learner(model, params):
@@ -287,7 +348,7 @@ def learner(model, params):
   train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
   test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
 
-  train_ds_with_outliers = get_flattened_dataset(train_ds_og, params, cutoff=None)
+  train_ds_with_outliers = get_flattened_dataset(train_ds_og, params, cutoff=None, batch=False)
 
   # Scan training data for outliers in high stresses
   # '''
@@ -301,7 +362,6 @@ def learner(model, params):
       while True:
         traj_count += 1
         inputs = iterator.get_next()
-
         final_stresses.append(tf.reduce_max(inputs["stress"][-1])  )
 
     except tf.errors.OutOfRangeError:
@@ -313,19 +373,20 @@ def learner(model, params):
 
 
  
-  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff) #percentile_cutoff
-  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff) #percentile_cutoff
-  test_ds = get_flattened_dataset(test_ds, params, cutoff=percentile_cutoff)
+  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff, batch=False) #percentile_cutoff
+  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff, batch=False) #percentile_cutoff
+  test_ds = get_flattened_dataset(test_ds, params, cutoff=percentile_cutoff,  batch=False)
 
 
 
 
   ##### TF 2 optimizer
   optimizer = snt.optimizers.Adam(learning_rate=FLAGS.learning_rate)
-  @tf.function(input_signature=[model.input_signature_dict])
+  @tf.function(input_signature=[model.input_signature_dict],  jit_compile=False)
   def train_step(inputs):
     with tf.GradientTape() as tape:
-      loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
+      # loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
+      loss_op = params['evaluator'].evaluate_one_step(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
 
     grads = tape.gradient(loss_op, model.trainable_variables)
     optimizer.apply(grads, model.trainable_variables)
@@ -355,9 +416,8 @@ def learner(model, params):
 
     try:
       while True:
-        inputs = iterator.get_next()
 
-        # print(inputs['world_pos'])
+        inputs = iterator.get_next()
 
         model.accumulate_stats(inputs)
 
@@ -372,7 +432,7 @@ def learner(model, params):
       pass
   # '''
   # print(model.accumulate_stats.pretty_printed_concrete_signatures())  
-  # quit()
+
   ########### Get distribution of all stresses seen during training
   '''
   iterator = iter(test_ds)
@@ -408,12 +468,15 @@ def learner(model, params):
 
     train_losses = []
 
-
     try:
       t0 = timeit.default_timer()
       while True:
       # with tf.profiler.experimental.Trace('my_train_step', step_num=step, _r=1):
         inputs = iterator.get_next()
+        # print(inputs['world_pos'])
+        # quit()
+        # inputs = remove_zero_world_edges(inputs)
+
         step += 1
 
         train_loss = train_step(inputs)

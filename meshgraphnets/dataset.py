@@ -20,16 +20,16 @@ import functools
 import json
 import os
 import trimesh
-import tensorflow.compat.v1 as tf
+import tensorflow as tf#tensorflow.compat.v1 as tf
 
 
-from tfdeterminism import patch
+# from tfdeterminism import patch
 # patch()
 SEED = 55
 os.environ['PYTHONHASHSEED'] = str(SEED)
 # random.seed(SEED)
 # np.random.seed(SEED)
-tf.set_random_seed(SEED)
+tf.random.set_seed(SEED)
 
 from meshgraphnets.common import NodeType
 
@@ -124,6 +124,14 @@ def add_targets(ds, FLAGS, fields, add_history):
     out = {}
     for key, val in trajectory.items():
 
+      # Make gripper_pos a gripper_pos pair
+      if "gripper_pos" in key:
+        val = tf.tile(val, [1, 1, 2])
+
+      if "tfn" in key:
+        val = tf.transpose(val, [0, 2, 1])
+
+  
       if "stress" in key:
         val = tf.nn.relu(val)
 
@@ -138,6 +146,14 @@ def add_targets(ds, FLAGS, fields, add_history):
         val = tf.tile(first_elem, [val_len, 1, 1])
 
       # '''
+      # if key in ["world_edges"]:
+      #   print(val.shape)
+      #   all_senders, all_receivers = tf.unstack(val, axis=-1)
+      #   all_senders_ragged = tf.RaggedTensor.from_tensor(all_senders, padding=0)
+      #   all_receivers_ragged = tf.RaggedTensor.from_tensor(all_receivers, padding=0)
+      #   val = tf.stack([all_senders_ragged, all_receivers_ragged], axis=-1)
+      #   val = tf.cast(val, dtype=tf.int64)
+
 
       out[key] = val[1:-1]
       
@@ -178,25 +194,31 @@ def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
 
 def batch_dataset(ds, batch_size):
   """Batches input datasets."""
-  shapes = ds.output_shapes
-  types = ds.output_types
 
   ################aaaaaaaaaaaaaaaaaaaaaaaaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   # return ds.batch(5) # You need window to give you control
+  shapes = tf.compat.v1.data.get_output_shapes(ds)
+  types = tf.compat.v1.data.get_output_types(ds)
+
 
   def my_batch_accumulate(ds_window):
     out = {}
-    print("-----")
     for key, ds_val in ds_window.items():
-      print(key, ds_val)
-      out[key] = ds_val
+      merge = lambda prev, cur: tf.concat([prev, cur], axis=1)
+      initial = tf.zeros([shapes[key][0], 1, shapes[key][2]], dtype=types[key])
+
+      out[key] = ds_val.reduce(initial, merge)
+
     return out
-  ds =  ds.window(5, drop_remainder=True)
-  ds = ds.map(my_batch_accumulate)
-  return ds 
+    
+  ds_windows =  ds.window(5, drop_remainder=True)
+  ds_ba = ds_windows.map(my_batch_accumulate)
+  return ds_ba 
 
 
-  ##############
+  ################################
+  # shapes = ds.output_shapes
+  # types = ds.output_types
 
   def renumber(buffer, frame):
     nodes, cells = buffer

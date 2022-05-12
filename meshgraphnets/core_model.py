@@ -23,7 +23,7 @@ import sonnet as snt
 # import tensorflow.compat.v1 as tf
 import tensorflow as tf
 
-from tfdeterminism import patch
+# from tfdeterminism import patch
 # patch()
 SEED = 55
 os.environ['PYTHONHASHSEED'] = str(SEED)
