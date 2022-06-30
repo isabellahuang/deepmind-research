@@ -74,8 +74,8 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
       model_input_dict['gripper_pos'] = inputs['gripper_pos'][step]
       model_input_dict['target|gripper_pos'] = inputs['target|gripper_pos'][step]
 
-
-    next_pos_pred, next_stress_pred, loss_val = model(model_input_dict, False, normalize, accumulate)
+    use_precomputed = False
+    next_pos_pred, next_stress_pred, loss_val = model(model_input_dict, use_precomputed, normalize, accumulate)
 
 
 
@@ -158,13 +158,12 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
 
   f_verts_open, gripper_normal = deforming_plate_model.f_verts_at_pos(inputs, [0.04, 0.04], f_pc_original)
 
+
   def project_to_normal(normal, pos):
+    perp_dists_tf = tf.tensordot(pos, tf.transpose(normal), 1) #tensordot with transpose of normal instead of normal
 
-
-    perp_dists_tf = tf.tensordot(pos, normal, 1)
-
-    return pos - normal * perp_dists_tf[:, None]
-
+    return pos - perp_dists_tf * normal
+    # return pos - normal * perp_dists_tf[:, None]
 
 
   def idx_in_rect_tf(pos, f_verts_open_proj):
@@ -179,11 +178,11 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
 
 
   def gripper_pos_at_contact_tf(points_in_rect, normal, p1, p2):
-    f1_closest_dist = tf.reduce_min(tf.tensordot(points_in_rect - p1, -1. * normal, 1))
 
-    f2_closest_dist = tf.reduce_min(tf.tensordot(points_in_rect - p2, normal,1))
-    return tf.stack([0.04 - f1_closest_dist, 0.04 - f2_closest_dist])
-    # return 0.04 - tf.reduce_min(tf.stack([f1_closest_dist, f2_closest_dist]))
+    f1_closest_dist = tf.reduce_min(tf.tensordot(points_in_rect - p1, -1. * tf.transpose(normal), 1))
+
+    f2_closest_dist = tf.reduce_min(tf.tensordot(points_in_rect - p2, tf.transpose(normal),1))
+    return tf.stack([0.04 - f1_closest_dist + 0.0005, 0.04 - f2_closest_dist + 0.0005])
 
   corner_idx1 = [43, 23, 8, 28] # Corners 
   p1_idx, p2_idx = 143, 1036
@@ -202,22 +201,20 @@ def gripper_pos_at_first_contact(inputs, f_pc_original):
   contact_gripper_pos_tf = gripper_pos_at_contact_tf(points_in_rect_tf, gripper_normal, f_verts_open[p1_idx], f_verts_open[p2_idx])
 
   contact_gripper_pos_tf = tf.expand_dims(contact_gripper_pos_tf, axis=0)
-  # contact_gripper_pos_tf = tf.expand_dims(contact_gripper_pos_tf, axis=0)
 
   return contact_gripper_pos_tf
 
-# loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
-@tf.function(jit_compile=False)
 def evaluate_one_step(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=False, tfn=0, eval_step=0, force=0):
 
-  # This should be replaced later, move this to the dataset processing
+  # This should be replaced later, move this to the dataset processing   
   initial_state = {k: v[0] for k, v in inputs.items()}
 
   # initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
 
-
-  next_pos_pred, next_stress_pred, loss_val = model(initial_state, True, normalize, accumulate)
+  use_precomputed = True
+  next_pos_pred, next_stress_pred, loss_val = model(initial_state, use_precomputed, normalize, accumulate)
   return loss_val
+
 
 
 def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=False, tfn=0, eval_step=0, force=0):
@@ -229,15 +226,11 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
   initial_state = {k: v[0] for k, v in inputs.items()}
 
+  # Use this only when calculating gradients for grasp refinement
   # initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
 
   if not num_steps:
-    num_steps = inputs['cells'].shape[0] # Length of trajectory
-
-
-
-  # ##### FOR MEMORY SAKE. DELETE AFTER
-  # num_steps = 3
+    num_steps = inputs['node_type'].shape[0] # Length of trajectory
 
   pos_prediction, stress_prediction, rollout_losses = _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumulate)
 
@@ -251,8 +244,11 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   # Raw stress errors
   stress_error = tf.reduce_mean(tf.reduce_sum(((stress_prediction - inputs['stress'][:num_steps]) ** 2), axis=-1), axis=-1) # new way
   baseline_stress_error = tf.reduce_mean(tf.reduce_sum(((inputs['stress'][:num_steps] - inputs['stress'][0]) ** 2), axis=-1), axis=-1) # new way
-  # stress_error = baseline_stress_error # for simple mlp only
 
+  # print("After having validated")
+  # print(stress_prediction[20])
+  # print(tf.reduce_sum(stress_prediction[20]))
+  # print(inputs['stress'][20])
 
   scalars = {}
   
@@ -300,6 +296,9 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
       # 'world_edges': inputs['world_edges'],
       'node_mod': inputs['node_mod'],
   }
+
+  # Just for debugging whether we can optimize over increasing contact points
+  # world_senders, world_receivers = common.construct_world_edges(world_pos, inputs['node_type'], self.FLAGS)
 
 
 

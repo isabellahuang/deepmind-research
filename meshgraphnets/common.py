@@ -49,11 +49,11 @@ def sr_mesh_edges(mesh_edges):
   all_senders, all_receivers = tf.unstack(mesh_edges, axis=1)
 
 
-  ### This should work now, because non-unique mesh edges are removed in the h5 to tf
-  return (tf.concat([all_senders, all_receivers], axis=0),
-          tf.concat([all_receivers, all_senders], axis=0))
+  ### This should work once non-unique mesh edges are removed in the h5 to tf
+  # return (tf.concat([all_senders, all_receivers], axis=0),
+  #         tf.concat([all_receivers, all_senders], axis=0))
 
-  '''
+  # '''
   # Remove non-unique edges
   difference = tf.math.subtract(all_senders, all_receivers)
   unique_edge_idxs = tf.where(tf.not_equal(difference, 0))
@@ -65,7 +65,7 @@ def sr_mesh_edges(mesh_edges):
 
   return (tf.concat([senders, receivers], axis=0),
           tf.concat([receivers, senders], axis=0))
-  '''
+  # '''
 
 def sr_world_edges(world_edges):
 
@@ -154,13 +154,14 @@ def construct_world_edges(world_pos, node_type, FLAGS):
   A = tf.cast(A, tf.float64)
   B = tf.cast(B, tf.float64)
 
-  thresh = 0.005
+  thresh = 0.003#0.005
 
   if utils.using_dm_dataset(FLAGS):
     thresh = 0.03
 
   # ''' Tried and true
   dists = squared_dist(A, B)
+
 
   # Compare to cdist
 
@@ -177,4 +178,39 @@ def construct_world_edges(world_pos, node_type, FLAGS):
   return (tf.concat([senders, receivers], axis=0),
           tf.concat([receivers, senders], axis=0))
   # '''
+
+def construct_world_edges_min_dists(world_pos, node_type, FLAGS):
+
+  deformable_idx = tf.where(tf.not_equal(node_type[:, 0], NodeType.OBSTACLE))
+  actuator_idx = tf.where(tf.equal(node_type[:, 0], NodeType.OBSTACLE))
+  B = tf.squeeze(tf.gather(world_pos, deformable_idx))
+  A = tf.squeeze(tf.gather(world_pos, actuator_idx))
+
+  A = tf.cast(A, tf.float64)
+  B = tf.cast(B, tf.float64)
+
+  thresh = 0.003#0.005
+
+  if utils.using_dm_dataset(FLAGS):
+    thresh = 0.03
+
+  # ''' Tried and true
+  dists = squared_dist(A, B)
+  min_dists = tf.reduce_min(dists, axis=0)
+  sigmoid_activated = tf.math.sigmoid(1e6 * (-1. * min_dists + thresh ** 2))
+
+  '''
+  print(min_dists.shape)
+  print(sigmoid_activated)
+  import matplotlib.pyplot as plt 
+  plt.scatter(min_dists, sigmoid_activated)
+  plt.scatter([thresh**2], [0.5])
+  plt.show()
+  quit()
+  '''
+
+
+  return tf.reduce_sum(sigmoid_activated)
+
+
 

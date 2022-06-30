@@ -74,7 +74,7 @@ flags.DEFINE_enum('rollout_split', 'valid', ['train', 'test', 'valid'],
 flags.DEFINE_integer('num_rollouts', 20, 'No. of rollout trajectories')
 flags.DEFINE_integer('num_training_steps', int(10e6), 'No. of training steps')
 
-flags.DEFINE_integer('batch_size', 1, 'Batch size')
+flags.DEFINE_integer('batch_size', 5, 'Batch size')
 flags.DEFINE_integer('num_epochs', 50, 'Num epochs')
 flags.DEFINE_integer('num_epochs_per_validation', 5, 'Num epochs to train before validating')
 flags.DEFINE_integer('num_training_trajectories', 100, 'No. of training trajectories')
@@ -148,19 +148,13 @@ LEN_TRAJ = 0
 
 
 
-def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None, batch=False):
+def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=False):
   # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
   ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
   
   test = not n_horizon
   if test:
     n_horizon = LEN_TRAJ
-
-  # if FLAGS.batch_size > 1:
-  #   ds = dataset.batch_dataset(ds, FLAGS.batch_size)
-  # if os.environ["LOCAL_FLAG"] == "1": # If not on NGC
-  #   ds = ds.take(1)
-    # pass
 
   noise_field = params['noise_field']
   noise_scale = params['noise']
@@ -173,16 +167,18 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None, batch=False):
     ds = ds.take(FLAGS.num_testing_trajectories)
 
   # Filter trajectories for outliers
-  def filter_func(elem, cutoff):
-      """ return True if the element is to be kept """
-      last_stress = elem["stress"]
-      max_last_stress = tf.reduce_max(last_stress)
+  def filter_func(elem):
+      """ return True if  element is to be kept """
+      cutoff = elem["cutoffs"][0][0][2]  # Cutoffs are percentiles [95, 96, 97, 98, 99]
+      max_last_stress = tf.reduce_max(elem["target|stress"])
       return max_last_stress <= cutoff
-  if cutoff:
-    ds = ds.filter(lambda ff: filter_func(ff, cutoff))
+
+
+  if do_cutoff:
+    ds = ds.filter(lambda ff: filter_func(ff))
 
   # Shuffle trajectories selected for training
-  # ds = ds.shuffle(500)
+  ds = ds.shuffle(50)
 
   def repeat_and_shift(trajectory):
     out = {}
@@ -190,21 +186,6 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None, batch=False):
       shifted_lists = []
       for i in range(LEN_TRAJ - n_horizon + 1):
         shifted_list = tf.roll(val, shift=-i, axis=0)[:n_horizon]
-
-
-        # if key in ["world_edges"]:
-        #   all_senders, all_receivers = tf.unstack(shifted_list, axis=-1)
-        #   # all_senders_ragged = tf.RaggedTensor.from_tensor(all_senders, padding=0)
-        #   all_senders_ragged = tf.RaggedTensor.from_tensor(all_senders)
-
-        #   # all_receivers_ragged = tf.RaggedTensor.from_tensor(all_receivers, padding=0)
-        #   all_receivers_ragged = tf.RaggedTensor.from_tensor(all_receivers)
-
-        #   shifted_list = tf.stack([all_senders_ragged, all_receivers_ragged], axis=-1)
-        #   shifted_list = shifted_list.with_row_splits_dtype(tf.int32)
-
-
-
         shifted_lists.append(shifted_list)
 
       out[key] = shifted_lists
@@ -213,33 +194,26 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None, batch=False):
     return tf.data.Dataset.from_tensor_slices(out)
 
 
-  def my_map(frame):
+  def world_edges_processing_map(frame):
+    # frame['world_edges'] = frame['world_edges'][:, :200]
+
+
+    # Remove non-unique edges
+    # '''
     val = frame['world_edges']
     sum_across_row = tf.reduce_sum(val, axis=-1)
-
-    # all_senders, all_receivers = tf.unstack(val, axis=-1)
-    # difference = tf.math.subtract(all_senders, all_receivers)
     unique_edges = tf.where(tf.not_equal(sum_across_row, 0))
     close_pair_idx = tf.gather(val, unique_edges[:,1], axis=1)
-    val = close_pair_idx
-    frame['world_edges'] = val
+    frame['world_edges'] = close_pair_idx  # (1, num_unique_world_edges, 2)
+    # '''
+
+    # Assign distributed force to each edge
+    num_unique_world_edges = tf.shape(frame['world_edges'])[1]
+    force_features = tf.fill(tf.shape(frame['world_edges']), frame['force'][0][0][0] / tf.cast(num_unique_world_edges, dtype=tf.float32))
+    senders, receivers = tf.unstack(force_features, axis=-1)
+    frame['world_edges_over_force'] = tf.expand_dims(tf.concat([senders, receivers], axis=-1), axis=-1)
+
     return frame
-
-    '''
-    out = {}
-    for key, val in trajectory.items():
-      if key in ["world_edges"]:
-
-        all_senders, all_receivers = tf.unstack(val, axis=-1)
-        # difference = tf.math.subtract(all_senders, all_receivers)
-        # unique_edges = tf.where(tf.not_equal(difference, 0))
-        # close_pair_idx = tf.gather(val, unique_edges[:,1], axis=1)
-        # val = close_pair_idx
-
-      out[key] = val
-    return out#tf.data.Dataset.from_tensor_slices(out)
-
-    '''
 
 
   def use_pd_stress(frame):
@@ -269,34 +243,39 @@ def get_flattened_dataset(ds, params, n_horizon=None, cutoff=None, batch=False):
   if not test:
     ds =  ds.flat_map(repeat_and_shift)
 
-    # ds = ds.map(my_map, num_parallel_calls=tf.data.AUTOTUNE)
+    # Remove zero world edges
+    ds = ds.map(world_edges_processing_map, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Add noise
     ds = ds.map(add_noise, num_parallel_calls=tf.data.AUTOTUNE) #Used to be 8
 
 
-  # ds = ds.shuffle(500)
+  ds = ds.shuffle(500) # Used to both be 500
 
-  if batch:
-    ds = dataset.batch_dataset(ds, 5)
+  if batch and FLAGS.batch_size > 1:
+    ds = dataset.batch_dataset(ds, FLAGS.batch_size)
 
-  return ds.prefetch(tf.data.AUTOTUNE)
+  return ds.prefetch(1)
 
 
 
 def evaluator_file_split():
   total_folder = FLAGS.dataset_dir
-  total_files = [os.path.join(total_folder, k) for k in os.listdir(total_folder)]
+  total_files = sorted([os.path.join(total_folder, k) for k in os.listdir(total_folder)])
+
   train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
   train_files = [k for k in total_files if '00000007' in k] # circular disk
   train_files = [k for k in total_files if '00000016' in k] # rectangular prism
 
   train_files = [k for k in total_files if 'rectangle' in k] # rectangle dense grasps
 
+  # abc simple objects
+  train_files = total_files[:20]
+
   if utils.using_dm_dataset(FLAGS):
     train_files = [k for k in total_files if 'valid' in k] # MGN dataset
 
-  test_files = train_files
+  test_files = total_files[20:25]
 
   return train_files, test_files
 
@@ -312,6 +291,7 @@ def remove_zero_world_edges(inputs):
   return inputs
 
 
+# @tf.function
 def learner(model, params):
   """Run a learner job."""
 
@@ -345,39 +325,15 @@ def learner(model, params):
 
 
   ### Load datasets by files in folders 
+
   train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files, FLAGS.num_objects)
+
   test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
 
-  train_ds_with_outliers = get_flattened_dataset(train_ds_og, params, cutoff=None, batch=False)
-
-  # Scan training data for outliers in high stresses
-  # '''
-  if latest is None:
-    print("Filtering out outliers")
-
-    iterator = iter(train_ds_with_outliers)
-    final_stresses = []
-    traj_count = 0
-    try:
-      while True:
-        traj_count += 1
-        inputs = iterator.get_next()
-        final_stresses.append(tf.reduce_max(inputs["stress"][-1])  )
-
-    except tf.errors.OutOfRangeError:
-      pass
-  # '''
-  # Save this to dict per object name
-  percentile_cutoff = tfp.stats.percentile(final_stresses, 97, interpolation='linear')
-
-
-
  
-  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff, batch=False) #percentile_cutoff
-  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, cutoff=percentile_cutoff, batch=False) #percentile_cutoff
-  test_ds = get_flattened_dataset(test_ds, params, cutoff=percentile_cutoff,  batch=False)
-
-
+  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, do_cutoff=True, batch=True) #percentile_cutoff
+  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, do_cutoff=True, batch=False) #percentile_cutoff
+  test_ds = get_flattened_dataset(test_ds, params, do_cutoff=True,  batch=False)
 
 
   ##### TF 2 optimizer
@@ -385,7 +341,6 @@ def learner(model, params):
   @tf.function(input_signature=[model.input_signature_dict],  jit_compile=False)
   def train_step(inputs):
     with tf.GradientTape() as tape:
-      # loss_op, traj_op, scalar_op = params['evaluator'].evaluate(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
       loss_op = params['evaluator'].evaluate_one_step(model, inputs, FLAGS, num_steps=n_horizon, normalize=True)
 
     grads = tape.gradient(loss_op, model.trainable_variables)
@@ -393,7 +348,10 @@ def learner(model, params):
 
     return loss_op
 
-
+  @tf.function(input_signature=[model.validation_signature_dict],  jit_compile=False)
+  def validation_step(inputs):
+    test_loss, test_traj_data, test_scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True)
+    return test_loss, test_traj_data, test_scalar_data
 
 
   if latest is not None:
@@ -418,7 +376,6 @@ def learner(model, params):
       while True:
 
         inputs = iterator.get_next()
-
         model.accumulate_stats(inputs)
 
         num_train_dp += 1
@@ -432,7 +389,7 @@ def learner(model, params):
       pass
   # '''
   # print(model.accumulate_stats.pretty_printed_concrete_signatures())  
-
+  # quit()
   ########### Get distribution of all stresses seen during training
   '''
   iterator = iter(test_ds)
@@ -460,43 +417,42 @@ def learner(model, params):
   '''
   #####################
 
+  # @tf.function
+  # def train():
+
   step = 0
+  epoch_time = 0
+
 
   # tf.profiler.experimental.start(FLAGS.checkpoint_dir)
   for i in range(FLAGS.num_epochs):
-    iterator = iter(train_ds)
 
+    iterator = iter(train_ds)
     train_losses = []
 
     try:
       t0 = timeit.default_timer()
       while True:
-      # with tf.profiler.experimental.Trace('my_train_step', step_num=step, _r=1):
+        # with tf.profiler.experimental.Trace('my_train_step', step_num=step, _r=1):
         inputs = iterator.get_next()
-        # print(inputs['world_pos'])
-        # quit()
-        # inputs = remove_zero_world_edges(inputs)
+
 
         step += 1
 
         train_loss = train_step(inputs)
         train_losses.append(train_loss)
 
-        if step % 100 == 0:
+        if step % 500 == 0:
           logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
 
     except tf.errors.OutOfRangeError:
-      # with train_summary_writer.as_default():
-        # tf.summary.scalar('train_loss', np.mean(train_losses), step=i)
+
       tnext = timeit.default_timer()
-      print("------Time taken for epoch", i, ":", tnext - t0)
-
-
-    # print(train_step.pretty_printed_concrete_signatures())  
-    continue
-
+      epoch_time = tnext - t0
+      print("------Time taken for epoch", i, ":", epoch_time, np.mean(train_losses))
 
     ################
+    # '''
     if i % FLAGS.num_epochs_per_validation == 0:
       print("Validating")
 
@@ -509,12 +465,18 @@ def learner(model, params):
 
       try:
         validation_counter = 0
+        validation_t0 = timeit.default_timer()
         while True:
           inputs = iterator.get_next()
 
-          validation_counter += 1
-          test_loss, test_traj_data, test_scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
 
+
+          # '''
+          validation_counter += 1
+          # test_loss, test_traj_data, test_scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
+
+          # Make tf function
+          test_loss, test_traj_data, test_scalar_data = validation_step(inputs) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
 
           test_losses.append(test_loss)
           test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
@@ -526,9 +488,12 @@ def learner(model, params):
           test_stress_final_errors.append(test_scalar_data["stress_final_error"])
           baseline_stress_mean_errors.append(test_scalar_data['baseline_stress_mean_error'])
           baseline_stress_final_errors.append(test_scalar_data['baseline_stress_final_error'])
-
+          # '''
 
       except tf.errors.OutOfRangeError:
+        validation_tnext = timeit.default_timer()
+        validation_time = validation_tnext - validation_t0
+        print("****** Time taken for validation", i, ":", validation_time, "with counter at", validation_counter)
         pass
 
 
@@ -542,15 +507,16 @@ def learner(model, params):
           print("Saving")
           save_path = manager.save()
           print("Saved to", save_path)
+    # '''
 
     # Record losses in text file
     logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
 
     if FLAGS.checkpoint_dir:
       file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
-      log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
+      log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
         np.mean(test_pos_final_errors), np.mean(baseline_pos_mean_errors), np.mean(baseline_pos_final_errors), \
-        np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors))
+        np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors), epoch_time)
 
       file.write(log_line)
       file.close()
@@ -558,13 +524,11 @@ def learner(model, params):
   logging.info('Training complete.')
   # tf.profiler.experimental.stop()
 
+  # train()
 
-
-# Not yet migrated to TF 2
 def evaluator(model, params):
   """Run a model rollout trajectory."""
   train_files, test_files = evaluator_file_split()
-
 
   trajectories = []
   scalars = []
@@ -585,9 +549,6 @@ def evaluator(model, params):
     deformations_accuracy_running[k] = [0, 0]
 
 
-  # train_objects = test_files[:1] # object 15
-  # test_objects = [k for k in train_files if '00000007' in k]
-  test_objects = test_files 
 
   # Restore checkpoint
   checkpoint = tf.train.Checkpoint(module=model)
@@ -598,18 +559,12 @@ def evaluator(model, params):
     checkpoint.restore(latest)
 
 
-  # ds = dataset.load_dataset(FLAGS.dataset_dir, test_files, max(1, int(0.3 * FLAGS.num_objects)))
-  # ds = get_flattened_dataset(ds, params)
 
-
-
-  for ot, obj_file in enumerate(test_objects):
+  for ot, obj_file in enumerate(test_files):
     print("===", obj_file, ot, "of", len(test_files))
     ds = dataset.load_dataset(FLAGS.dataset_dir, [obj_file], FLAGS.num_objects)
     ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
     iterator = iter(ds)
-
-
 
 
 
@@ -633,19 +588,32 @@ def evaluator(model, params):
     num_decrease, num_increase = 0, 0
     try:
       # while True:
-      for traj_idx in range(20): # should be 48
+      for traj_idx in range(1): # shifted is for traj 0
         inputs = iterator.get_next()
 
-        # if traj_idx < 200:
-        #   continue
-
-
+        # if traj_idx < 20:
+          # continue
+      
+        # We need this here because we switched the dimensions of inputs['tfn'] earlier
+        # inputs['tfn'] = tf.transpose(inputs['tfn'], [0, 2, 1])
 
         # Calculate gradients
         calculate_gradients = False
+        calculate_gradients_line_search = False
+        calculate_gradients_for_contact = False
         if calculate_gradients:
           optimizer = snt.optimizers.Adam(learning_rate=5e-4) #1e-7
-          inputs = {k: v[20:21] for k, v in inputs.items()}
+          optimizer = snt.optimizers.Adam(learning_rate=5e-5) #1e-7
+
+
+          inputs = {k: v[40:41] for k, v in inputs.items()}
+
+          # Shifted for low contact
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., 0., 1.0996647, -0.00567998]]]) # original value
+
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., 0.00293704,  1.1156418,-0.0202289 ]]]) # shifted for low contact
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., 0.00293704,  1.0956418,-0.005 ]]]) # shifted for low contact
+
           inputs['tfn'] = tf.Variable(inputs['tfn'])
 
 
@@ -657,17 +625,20 @@ def evaluator(model, params):
 
               direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
 
-            input_grad = -1. * tape.gradient(traj_data['mean_pred_stress'], inputs['tfn'])
 
+            input_grad = -1. * tape.gradient(traj_data['mean_pred_stress'], inputs['tfn']) # -1 in front means to maximize the quantity
             # Optimize over input
             optimizer.apply(input_grad, [inputs['tfn']])
 
             # Keep the euler part the same
             input_grad_np = input_grad.numpy()
             updated_input_np = inputs['tfn'].numpy()
-            updated_input_np[:, :3, :] = original_tfn_np[:, :3, :]
+            # updated_input_np[:, :3, :] = original_tfn_np[:, :3, :]
+            updated_input_np[:, :, :3] = original_tfn_np[:, :, :3]
+
 
             inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np))
+            print("Updated tfn", inputs['tfn'])
             return traj_data['mean_pred_stress'], inputs
 
             # print("Original mean pred stress", traj_data['mean_pred_stress'].numpy())
@@ -689,7 +660,341 @@ def evaluator(model, params):
           for k in range(50):
             mean_pred_stress, inputs = refine_step(inputs)
             print(mean_pred_stress)
+            
             refined_stresses.append(mean_pred_stress)
+
+            world_pos_traj.append(inputs['world_pos'].numpy())
+            tfn_traj.append(inputs['tfn'].numpy())
+
+            # Infer gripper pos at first contact
+            initial_state = {k: v[0] for k, v in inputs.items()}
+            # print(initial_state['tfn'])
+            initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
+            g_pos = np.random.rand()
+            f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
+            f_verts_traj.append(f_verts.numpy())
+
+          # '''
+          fig2 = plt.figure()
+          plt.plot(refined_stresses)
+          plt.xlabel("Iteration step #")
+          plt.ylabel("Predicted mean stress")
+          # plt.show()
+
+          fig = plt.figure(figsize=(8, 8))
+          ax = fig.add_subplot(111, projection='3d')
+
+
+
+          def animate(frame_num):
+            ax.cla()
+
+            world_pos = world_pos_traj[frame_num]
+            f_verts_pos = f_verts_traj[frame_num]
+            X, Y, Z = world_pos.T
+            Xf, Yf, Zf = f_verts_pos.T
+            ax.scatter(X, Y, Z)
+            ax.scatter(Xf, Yf, Zf)
+            return fig,
+
+
+          # Plot the refined grasp pose + object
+          _ = animation.FuncAnimation(fig, animate, frames=50, repeat=False)
+          plt.show(block=True)
+          # quit()
+          continue
+        elif calculate_gradients_line_search:
+          optimizer = snt.optimizers.SGD(learning_rate=5e-4) #1e-7
+          optimizer = snt.optimizers.SGD(learning_rate=5e-9) #1e-7 # SGD's learning rate has to be way lower than Adam's
+
+
+          inputs = {k: v[40:41] for k, v in inputs.items()}
+
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., 0.00293704,  1.1156418,-0.0202289 ]]]) # shifted for low contact
+
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., -6.5854560e-06, 1.1062654e+00, -1.5860454e-02]]]) # shifted for low contact
+
+
+          inputs['tfn'] = tf.Variable(inputs['tfn'])
+
+          maximize_stress = True
+
+          def refine_step(inputs, k):
+            temp = np.linspace(1000, 5, 12)[k]
+            initial_inputs = inputs
+
+            # Add a disturbance term
+            _, traj_data_init, _ = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
+            initial_stress = traj_data_init['mean_pred_stress']
+
+            translational_disturbance  = np.random.rand(1, 1, 3)
+            translational_disturbance = (0.005 / (k+1)) * translational_disturbance / np.linalg.norm(translational_disturbance)
+            disturbed_tfn = inputs['tfn'].numpy()
+            disturbed_tfn[:, :, 3:] = disturbed_tfn[:, :, 3:] + translational_disturbance
+            inputs['tfn'] = tf.Variable(tf.convert_to_tensor(disturbed_tfn))
+            #####
+
+
+            with tf.GradientTape() as tape:
+              tape.watch(inputs['tfn'])
+              original_tfn_np = inputs['tfn'].numpy()
+              original_tfn = inputs['tfn']
+
+              direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
+
+
+            grad_direction = 1. if maximize_stress else -1. #-1. if maximize_stress else 1.
+            input_grad = tape.gradient(traj_data['mean_pred_stress'], inputs['tfn']) # -1 in front means to maximize the quantity
+            # Optimize over input
+
+            curr_stress = traj_data['mean_pred_stress']
+            next_stress = curr_stress
+            test_inputs = inputs
+            updated_input_np = np.copy(inputs['tfn'].numpy())
+            print("At this step, starting stress", curr_stress)
+
+            def next_stress_acceptable(next_stress, curr_stress, input_grad, lr):
+              if not maximize_stress:
+                return next_stress <= curr_stress - lr/2  * tf.norm(input_grad)**2
+              else:
+                return next_stress >= curr_stress + lr/2  * tf.norm(input_grad)**2
+
+            # Backtracking line search
+            beta = 0.7
+            lr = 5e-5
+
+            line_search_counter = 0
+            while tf.math.is_nan(next_stress) or (not tf.math.is_nan(next_stress) and not next_stress_acceptable(next_stress, curr_stress, input_grad, lr)):
+              if line_search_counter > 50 and tf.math.is_nan(next_stress):
+                break
+              # Reset to initial inputs
+              inputs['tfn'] = tf.Variable(tf.convert_to_tensor(original_tfn_np))
+
+              potential_next_tfn = inputs['tfn'] + lr * grad_direction * input_grad
+
+              # Keep the euler part the same
+              updated_input_np = potential_next_tfn.numpy()
+              updated_input_np[:, :, :3] = original_tfn_np[:, :, :3]
+              test_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np))
+
+              _, potential_traj_data, _ = params['evaluator'].evaluate(model, test_inputs, FLAGS) # Remove normalize field
+              next_stress = potential_traj_data['mean_pred_stress']
+              lr = beta * lr
+
+              line_search_counter += 1
+
+            print("lr", lr)
+
+            abs_delta_stress = np.abs(next_stress - initial_stress)
+
+            if tf.math.is_nan(next_stress):
+              return initial_stress, initial_inputs
+
+            if next_stress > initial_stress: # isabella, adapt this to minimization case
+              inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np)) # Update initial tfn
+
+            elif np.exp(-1.0 * abs_delta_stress / temp) > np.random.uniform():
+              inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np)) # Update initial tfn
+
+
+            return initial_stress, initial_inputs
+            return curr_stress, inputs
+
+            # print("Original mean pred stress", traj_data['mean_pred_stress'].numpy())
+
+          original_k = 0
+
+          import matplotlib
+          matplotlib.use('TkAgg')
+          from matplotlib import animation
+          import matplotlib.pyplot as plt 
+
+
+          # Optimize over inputs using optimizer
+          # '''
+          refined_stresses = []
+          world_pos_traj= []
+          tfn_traj = []
+          f_verts_traj = []
+
+          initial_state = {k: v[0] for k, v in inputs.items()}
+          initial_f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
+
+          for k in range(12):
+            mean_pred_stress, inputs = refine_step(inputs, k)
+            print(k, mean_pred_stress)
+
+            refined_stresses.append(mean_pred_stress)
+
+            world_pos_traj.append(inputs['world_pos'].numpy())
+            tfn_traj.append(inputs['tfn'].numpy())
+
+            # Infer gripper pos at first contact
+            initial_state = {k: v[0] for k, v in inputs.items()}
+            # print(initial_state['tfn'])
+            initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
+            g_pos = np.random.rand()
+            f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
+            f_verts_traj.append(f_verts.numpy())
+
+          # '''
+          fig2 = plt.figure()
+          plt.plot(refined_stresses)
+          plt.xlabel("Iteration step #")
+          plt.ylabel("Predicted mean stress")
+          # plt.show()
+
+          fig = plt.figure(figsize=(8, 8))
+          ax = fig.add_subplot(111, projection='3d')
+
+          # Don't animate
+          world_pos = world_pos_traj[-1]
+          f_verts_pos_initial = initial_f_verts.numpy()
+          f_verts_pos = f_verts_traj[-1]
+          X, Y, Z = world_pos.T
+          Xf, Yf, Zf = f_verts_pos.T
+          Xf0, Yf0, Zf0 = f_verts_pos_initial.T
+          ax.scatter(X[1180:], Y[1180:], Z[1180:])
+          # ax.scatter(X, Y, Z)
+
+          ax.scatter(Xf0, Yf0, Zf0)
+          ax.scatter(Xf, Yf, Zf)
+
+          x_min, x_max = np.min(X), np.max(X)
+          y_min, y_max = np.min(Y), np.max(Y)
+          z_min, z_max = np.min(Z), np.max(Z)
+          max_range = np.array([x_max - x_min, y_max - y_min, z_max - z_min]).max() / 2.0
+          mid_x = (x_max + x_min) * 0.5
+          mid_y = (y_max + y_min) * 0.5
+          mid_z = (z_max + z_min) * 0.5
+          ax.set_xlim(mid_x - max_range, mid_x + max_range)
+          ax.set_ylim(mid_y - max_range, mid_y + max_range)
+          ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+          plt.show()
+
+          def animate(frame_num):
+            ax.cla()
+
+            world_pos = world_pos_traj[frame_num]
+            f_verts_pos = f_verts_traj[frame_num]
+            X, Y, Z = world_pos.T
+            Xf, Yf, Zf = f_verts_pos.T
+            ax.scatter(X, Y, Z)
+            ax.scatter(Xf, Yf, Zf)
+
+            x_min, x_max = np.min(X), np.max(X)
+            y_min, y_max = np.min(Y), np.max(Y)
+            z_min, z_max = np.min(Z), np.max(Z)
+            max_range = np.array([x_max - x_min, y_max - y_min, z_max - z_min]).max() / 2.0
+            mid_x = (x_max + x_min) * 0.5
+            mid_y = (y_max + y_min) * 0.5
+            mid_z = (z_max + z_min) * 0.5
+            ax.set_xlim(mid_x - max_range, mid_x + max_range)
+            ax.set_ylim(mid_y - max_range, mid_y + max_range)
+            ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+
+            return fig,
+
+
+
+          # Plot the refined grasp pose + object
+          # _ = animation.FuncAnimation(fig, animate, frames=50, repeat=False)
+          # plt.show(block=True)
+          continue
+
+
+        elif calculate_gradients_for_contact:
+          optimizer = snt.optimizers.Adam(learning_rate=5e-4) #1e-7
+
+
+          inputs = {k: v[40:41] for k, v in inputs.items()}
+
+          # Make initial tfn have low contact
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., 0.00293704,  1.1156418,-0.0202289 ]]]) # shifted for low contact
+
+          # inputs['tfn'] = tf.convert_to_tensor([[[ 1.5707964, 0., 0., 0., 1.0996647, -0.00567998]]]) # original value
+
+
+
+          # quit()
+
+
+          inputs['tfn'] = tf.Variable(inputs['tfn'])
+
+
+          def refine_step(inputs):
+            with tf.GradientTape() as tape:
+              tape.watch(inputs['tfn'])
+              original_tfn_np = inputs['tfn'].numpy()
+              original_tfn = inputs['tfn']
+
+              # direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
+
+              initial_state = {k: v[0] for k, v in inputs.items()}
+
+
+
+              initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
+
+              f_verts, f_verts_next, f_force_vecs, unit_f_force_vecs = deforming_plate_model.gripper_world_pos(initial_state, model.f_pc_original) 
+              num_f_verts_total = tf.shape(f_verts)[0]
+              num_verts_total = tf.shape(initial_state['mesh_pos'])[0]
+              pad_diff = num_verts_total - num_f_verts_total
+              paddings = [[0, pad_diff], [0, 0]]
+              finger_world_pos = tf.pad(f_verts, paddings, "CONSTANT")
+              world_pos = tf.concat([f_verts, initial_state['world_pos'][1180:, :]], axis=0)
+              sum_dists = common.construct_world_edges_min_dists(world_pos, initial_state['node_type'], model.FLAGS)
+
+            
+            # input_grad = -1. * tape.gradient(traj_data['mean_pred_stress'], inputs['tfn'])
+
+            term_to_optimize = sum_dists
+            # term_to_optimize = world_pos
+
+            input_grad = -1. * tape.gradient(term_to_optimize, inputs['tfn']) # with -1 in front, it means to maximize the quantity to optimize
+
+            print("Gradient", input_grad) # currently this is all None
+            # '''
+            # Optimize over input
+            optimizer.apply(input_grad, [inputs['tfn']])
+
+            # Keep the euler part the same
+            input_grad_np = input_grad.numpy()
+            updated_input_np = inputs['tfn'].numpy()
+            updated_input_np[:, :, :3] = original_tfn_np[:, :, :3]
+
+
+            inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np))
+
+            print("new tfn", updated_input_np)
+            return term_to_optimize, inputs
+
+            # print("Original mean pred stress", traj_data['mean_pred_stress'].numpy())
+            # '''
+
+          original_k = 0
+
+          import matplotlib
+          matplotlib.use('TkAgg')
+          from matplotlib import animation
+          import matplotlib.pyplot as plt 
+
+
+          # Optimize over inputs using optimizer
+          # '''
+          refined_stresses = []
+          world_pos_traj= []
+          tfn_traj = []
+          f_verts_traj = []
+          for k in range(50):
+            mean_pred_stress, inputs = refine_step(inputs)
+            print(mean_pred_stress)
+            print(inputs['tfn'])
+            
+            refined_stresses.append(mean_pred_stress)
+
             world_pos_traj.append(inputs['world_pos'].numpy())
             tfn_traj.append(inputs['tfn'].numpy())
 
@@ -731,20 +1036,12 @@ def evaluator(model, params):
           continue
 
 
-
         else:
           direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS)
 
 
-
-
-
         logging.info('Rollout trajectory %d', traj_idx)
         traj_idx += 1
-
-
-
-
 
 
         trajectories.append(traj_data)
@@ -786,33 +1083,6 @@ def evaluator(model, params):
     except tf.errors.OutOfRangeError:
       pass
 
-    # plt.show()
-
-    '''
-    num_total = num_increase + num_decrease
-
-    print("Num increase", num_increase, num_increase/num_total)
-    print("Num decrease", num_decrease, num_decrease/num_total)
-    print("Total", num_total)
-    quit()
-    '''
-    ################
-    '''
-    import matplotlib.pyplot as plt
-    plt.figure()
-    plt.hist(pred_final_stresses['mean'], alpha=0.5, label="pred")
-    plt.hist(actual_final_stresses['mean'], alpha=0.5, label="gt")
-    plt.legend()
-
-    plt.figure()
-    plt.scatter(actual_final_stresses['mean'], pred_final_stresses['mean'], label="pred")
-    plt.scatter(actual_final_stresses['mean'], actual_final_stresses['mean'], label="gt")
-    plt.legend()
-    
-    plt.show()
-    '''
-
-    ####################
 
     for k in ['mean', 'max', 'median']:
       all_object_actual_final_stresses[k].extend(actual_final_stresses[k])
@@ -926,19 +1196,6 @@ def main(argv):
 
   model = params['model'].Model(learned_model, FLAGS)
 
-
-  # Try to make summary writer to visualize graph on tensorboard
-
-  # @tf.function 
-  # def my_fun(x):
-  #   return 2 * x
-
-  # a = tf.constant(10, tf.float32)
-  # writer = tf.summary.create_file_writer(FLAGS.checkpoint_dir)
-  # with writer.as_default():
-  #   tf.summary.graph(learned_model.__call__.get_concrete_function().graph)
-  #   # my_fun_graph = my_fun.get_concrete_function(a).graph
-  #   # tf.summary.graph(my_fun_graph)
 
 
 

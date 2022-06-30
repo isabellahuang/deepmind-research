@@ -193,8 +193,9 @@ def main(unused_argv):
 
     faces = rollout_data[traj]['faces'][step]
 
-    vmax = np.max(rollout_data[traj]['pred_stress'])#np.max(stress)
-    vmin = np.min(rollout_data[traj]['pred_stress'])# np.min(stress)
+    vmax = np.max(rollout_data[traj]['pred_stress'][:, 1180:])#np.max(stress)
+    vmin = np.min(rollout_data[traj]['pred_stress'][:, 1180:])# np.min(stress)
+
 
     gt_vmax = np.max(rollout_data[traj]['gt_stress'])
     gt_vmin = np.min(rollout_data[traj]['gt_stress'])
@@ -264,7 +265,9 @@ def main(unused_argv):
     # print(gt_stress, gt_pd_stress.shape, gt_pd_stress_calc[:100])
     # quit()
 
-    print("===", step, gt_force[0][0], np.mean(gt_stress[1180:]), np.mean(gt_pd_stress[1180:]))
+    # print("===", step, gt_force[0][0], np.mean(gt_stress[1180:]), np.mean(stress[1180:]))
+    print("===", step, gt_force[0][0], np.mean(stress[1180:]), np.max(gt_stress[1180:]))
+    # print("===", step, gt_force[0][0], np.mean(gt_stress[:1180]), np.mean(gt_pd_stress[:1180]))
 
 
 
@@ -281,9 +284,10 @@ def main(unused_argv):
     ######################
 
 
-    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
+    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
+
     # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
-    # ax.scatter(gt_sim_pos[:, 0], gt_sim_pos[:, 1], gt_sim_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
+    ax.scatter(gt_sim_pos[:, 0], gt_sim_pos[:, 1], gt_sim_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
 
 
 

@@ -23,6 +23,7 @@ import tensorflow as tf
 # from tfdeterminism import patch
 # patch()
 SEED = 55
+FAKE_BATCH_SIZE = 10
 os.environ['PYTHONHASHSEED'] = str(SEED)
 # random.seed(SEED)
 # tf.random.set_seed(SEED)
@@ -46,21 +47,15 @@ def open_gripper_at_pose(inputs, f_pc_original):
 
 
   euler, trans = tf.split(inputs['tfn'], 2, axis=-1)
-  # euler, trans = tf.split(inputs['tfn'][:,0], 2, axis=0) # old, back when tfn was (6, 1)
-
-  # quit()
-  # euler = tf.concat([euler, euler], axis=0)
-  # trans = tf.concat([trans, trans], axis=0)
-
 
   tf_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(euler)
 
   f_pc = tfg_transformation.rotation_matrix_3d.rotate(f_pc_original, tf_from_euler) + trans
 
-
   original_normal = tf.constant([1., 0., 0.], dtype=tf.float32)
   gripper_normal = tfg_transformation.rotation_matrix_3d.rotate(original_normal, tf_from_euler)
   f1_verts, f2_verts = tf.split(f_pc, 2, axis=0)
+
 
   return f1_verts, f2_verts, gripper_normal
 
@@ -109,8 +104,11 @@ def gripper_world_pos(inputs, f_pc_original):
 
 
 
-traj_len, bs = None, None
-signature_dict = {"cells": tf.TensorSpec(shape=[traj_len, None, 4], dtype=tf.int32, name="cells"),
+traj_len, bs = 1, None
+signature_dict = {
+                  "name": tf.TensorSpec(shape=[traj_len, bs, 1], dtype=tf.string, name="name"),
+                  "cutoffs": tf.TensorSpec(shape=[traj_len, bs, 5], dtype=tf.float32, name="cutoffs"),
+                  "cells": tf.TensorSpec(shape=[traj_len, None, 4], dtype=tf.int32, name="cells"),
                   "force": tf.TensorSpec(shape=[traj_len, bs, 1], dtype=tf.float32, name="force"),
                   "gripper_pos": tf.TensorSpec(shape=[traj_len, bs, 2], dtype=tf.float32, name="gripper_pos"),
                   "mesh_edges": tf.TensorSpec(shape=[traj_len, None, 2], dtype=tf.int32, name="mesh_edges"),
@@ -126,7 +124,36 @@ signature_dict = {"cells": tf.TensorSpec(shape=[traj_len, None, 4], dtype=tf.int
                   "target|world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="target|world_pos"),
                   "tfn": tf.TensorSpec(shape=[traj_len, bs, 6], dtype=tf.float32, name="tfn"), # (1, 6,1)
                   "world_edges": tf.TensorSpec(shape=[traj_len, None, 2], dtype=tf.int32, name="world_edges"),
-                  "world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="world_pos"),} 
+                  "world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="world_pos"),
+                  "world_edges_over_force": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="world_edges_over_force"),
+                  "velocity": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="velocity"),
+                  } 
+traj_len = 48
+validation_signature_dict = {
+                  "name": tf.TensorSpec(shape=[traj_len, bs, 1], dtype=tf.string, name="name"),
+                  "cutoffs": tf.TensorSpec(shape=[traj_len, bs, 5], dtype=tf.float32, name="cutoffs"),
+                  "cells": tf.TensorSpec(shape=[traj_len, None, 4], dtype=tf.int32, name="cells"),
+                  "force": tf.TensorSpec(shape=[traj_len, bs, 1], dtype=tf.float32, name="force"),
+                  "gripper_pos": tf.TensorSpec(shape=[traj_len, bs, 2], dtype=tf.float32, name="gripper_pos"),
+                  "mesh_edges": tf.TensorSpec(shape=[traj_len, None, 2], dtype=tf.int32, name="mesh_edges"),
+                  "mesh_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="mesh_pos"),
+                  "node_mod": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="node_mod"),
+                  "node_type": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.int32, name="node_type"),
+                  "pd_stress": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="pd_stress"),
+                  "sim_world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="sim_world_pos"),
+                  "stress": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="stress"),
+                  "target|force": tf.TensorSpec(shape=[traj_len, bs, 1], dtype=tf.float32, name="target|force"),
+                  "target|gripper_pos": tf.TensorSpec(shape=[traj_len, bs, 2], dtype=tf.float32, name="target|force"),
+                  "target|stress": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="target|stress"),
+                  "target|world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="target|world_pos"),
+                  "tfn": tf.TensorSpec(shape=[traj_len, bs, 6], dtype=tf.float32, name="tfn"), # (1, 6,1)
+                  "world_edges": tf.TensorSpec(shape=[traj_len, None, 2], dtype=tf.int32, name="world_edges"),
+                  "world_pos": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="world_pos"),
+                  # "world_edges_over_force": tf.TensorSpec(shape=[traj_len, None, 1], dtype=tf.float32, name="world_edges_over_force"),
+                  "velocity": tf.TensorSpec(shape=[traj_len, None, 3], dtype=tf.float32, name="velocity"),
+                  } 
+
+
 
 
 # @snt.allow_empty_variables
@@ -145,6 +172,7 @@ class Model(snt.Module):
     self.FLAGS = FLAGS
     self._learned_model = learned_model
     self.input_signature_dict = signature_dict
+    self.validation_signature_dict = validation_signature_dict
 
     ######### Output #########
     output_size = utils.get_output_size(self.FLAGS)
@@ -220,28 +248,18 @@ class Model(snt.Module):
 
     #######################################################################################
     # Calculate world pos partially from gripper_pos
-    if not utils.using_dm_dataset(self.FLAGS):
+    if not utils.using_dm_dataset(self.FLAGS) and not use_precomputed:
       f_verts, f_verts_next, f_force_vecs, unit_f_force_vecs = gripper_world_pos(inputs, self.f_pc_original) 
       num_f_verts_total = tf.shape(f_verts)[0]
       num_verts_total = tf.shape(inputs['mesh_pos'])[0]
       pad_diff = num_verts_total - num_f_verts_total
       paddings = [[0, pad_diff], [0, 0]]
       finger_world_pos = tf.pad(f_verts, paddings, "CONSTANT")
+      world_pos = tf.concat([f_verts, inputs['world_pos'][1180:, :]], axis=0)
 
-      # world_pos = inputs['world_pos']
-      # world_pos = tf.where(actuator_mask, finger_world_pos, inputs['world_pos']) # This should be equal to inputs['world_pos'] anyway
-      if use_precomputed:
+    elif use_precomputed:
         world_pos = inputs['world_pos']
-      else:
-        world_pos = tf.concat([f_verts, inputs['world_pos'][1180:, :]], axis=0)
-
-
-    else:
-    # If using full world pos directly
-      world_pos = inputs['world_pos']
-    # '''
-
-
+        
 
     ###################### Mesh edge features #########
     if utils.using_dm_dataset(self.FLAGS):
@@ -263,6 +281,10 @@ class Model(snt.Module):
         relative_mesh_pos,
         tf.norm(relative_mesh_pos, axis=-1, keepdims=True)], axis=-1)
 
+    # mesh_edge_features = tf.tile(mesh_edge_features, [FAKE_BATCH_SIZE, 1]) # fake batching
+    # receivers = tf.tile(receivers, [FAKE_BATCH_SIZE]) # fake batching
+    # senders = tf.tile(senders, [FAKE_BATCH_SIZE]) # fake batching
+
 
     mesh_edges = core_model.EdgeSet(
         name='mesh_edges',
@@ -271,7 +293,8 @@ class Model(snt.Module):
         senders=senders)
 
     #################### World edge features #########
-    if not use_precomputed:#self.FLAGS.compute_world_edges:
+    if not use_precomputed and self.FLAGS.compute_world_edges:
+    # if self.FLAGS.compute_world_edges:
       world_senders, world_receivers = common.construct_world_edges(world_pos, inputs['node_type'], self.FLAGS)
     else:
       world_senders, world_receivers = common.sr_world_edges(inputs['world_edges'])
@@ -296,11 +319,21 @@ class Model(snt.Module):
 
 
 
+    if not use_precomputed:
+    # if self.FLAGS.compute_world_edges or not use_precomputed:
+      world_edge_force_feature = tf.fill(tf.shape(relative_world_norm), force_label)
+      world_edge_force_change_feature = tf.fill(tf.shape(relative_world_norm), force_change_label)
+
+    else:
+      world_edge_force_feature = inputs['world_edges_over_force']
+
+
+
     if self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node and not self.FLAGS.simplified_predict_stress_change_only:
       world_edge_features = tf.concat([
           relative_world_pos,
           relative_world_norm,
-          tf.fill(tf.shape(relative_world_norm), force_label)], axis=-1)
+          world_edge_force_feature], axis=-1)
 
     elif self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node and self.FLAGS.simplified_predict_stress_change_only:
 
@@ -308,17 +341,22 @@ class Model(snt.Module):
         world_edge_features = tf.concat([
             relative_world_pos,
             relative_world_norm,
-            tf.fill(tf.shape(relative_world_norm), force_label)], axis=-1)
+            world_edge_force_feature], axis=-1)
       else:
         world_edge_features = tf.concat([
             relative_world_pos,
             relative_world_norm,
-            tf.fill(tf.shape(relative_world_norm), force_label),
-            tf.fill(tf.shape(relative_world_norm), force_change_label)], axis=-1)
+            world_edge_force_feature,
+            world_edge_force_change_feature], axis=-1)
     else:
       world_edge_features = tf.concat([
           relative_world_pos,
           relative_world_norm], axis=-1)
+
+
+    # world_edge_features = tf.tile(world_edge_features, [FAKE_BATCH_SIZE, 1]) # fake batching
+    # world_receivers = tf.tile(world_receivers, [FAKE_BATCH_SIZE]) # fake batching
+    # world_senders = tf.tile(world_senders, [FAKE_BATCH_SIZE]) # fake batching
 
 
     world_edges = core_model.EdgeSet(
@@ -335,20 +373,21 @@ class Model(snt.Module):
     zero_vel = tf.fill(tf.shape(inputs['mesh_pos']), 0.0)
 
     if self.FLAGS.gripper_force_action_input:
-      num_f_verts_total = 1180# tf.shape(f_verts)[0] 
-      num_verts_total = tf.shape(inputs['mesh_pos'])[0]#.get_shape().as_list()[0]
-      pad_diff = num_verts_total - num_f_verts_total 
-      paddings = [[0, pad_diff], [0, 0]] 
-      if self.FLAGS.simplified_predict_stress_change_only:
-        nonzero_vel = tf.pad(unit_f_force_vecs, paddings, "CONSTANT")
-
+      if not use_precomputed:
+        num_f_verts_total = 1180# tf.shape(f_verts)[0] 
+        num_verts_total = tf.shape(inputs['mesh_pos'])[0]#.get_shape().as_list()[0]
+        pad_diff = num_verts_total - num_f_verts_total 
+        paddings = [[0, pad_diff], [0, 0]] 
+        if self.FLAGS.simplified_predict_stress_change_only:
+          nonzero_vel = tf.pad(unit_f_force_vecs, paddings, "CONSTANT")
+        else:
+          nonzero_vel = tf.pad(f_force_vecs, paddings, "CONSTANT")
+        velocity = tf.where(actuator_mask, nonzero_vel, zero_vel) 
       else:
-        nonzero_vel = tf.pad(f_force_vecs, paddings, "CONSTANT")
-
+        velocity = inputs['velocity']
     else:
       nonzero_vel = inputs['target|world_pos'] - inputs['world_pos']
 
-    velocity = tf.where(actuator_mask, nonzero_vel, zero_vel) 
 
     ##########
     node_type = tf.one_hot(inputs['node_type'][:, 0], common.NodeType.SIZE)
@@ -375,6 +414,9 @@ class Model(snt.Module):
 
     # '''
 
+    # Fake batching
+    # node_features = tf.tile(node_features, [FAKE_BATCH_SIZE, 1])
+
 
     return core_model.MultiGraph(
         node_features=self._node_normalizer(node_features, is_training),
@@ -398,13 +440,6 @@ class Model(snt.Module):
     per_node_network_output = self._learned_model(graph)
     return self._update(inputs, use_precomputed, per_node_network_output, normalize, accumulate)
 
-  def print_debug(self, inputs):
-    """L2 loss on position."""
-    # inputs_stacked = tf.concat([inputs['gripper_pos'], inputs['force'], inputs['tfn']], axis=1)
-    return tf.reduce_mean(inputs['world_pos'])
-    inputs_stacked = tf.squeeze(tf.concat([inputs['gripper_pos'], inputs['tfn'],  inputs['gripper_pos']], axis=1))
-    return tf.shape(inputs_stacked)
-    return tf.shape(inputs['node_type'])
 
 
   # @tf.function works here!
@@ -449,12 +484,6 @@ class Model(snt.Module):
   def loss(self, inputs, use_precomputed, normalize=True, accumulate=False):
     """L2 loss on position."""
 
-    # with tf.variable_scope("foo", reuse=True):
-    #### MLP #####
-    # network_output = self._learned_model(inputs)
-    # loss = (tf.reduce_mean(inputs['stress']) - network_output) ** 2
-    # return loss
-    ######
 
     # Get targets
     combined_target = self.get_output_targets(inputs)
@@ -492,6 +521,11 @@ class Model(snt.Module):
     else:
       target_normalized = combined_target
 
+
+    # Fake batching
+    # target_normalized = tf.tile(target_normalized, [FAKE_BATCH_SIZE, 1])
+
+
     ### OBJECT POS LOSSES ######
     if not utils.predict_some_stress_only(self.FLAGS):
       object_target_normalized, stress_target_normalized = tf.split(target_normalized, [3, 1], 1)
@@ -506,15 +540,15 @@ class Model(snt.Module):
     else:
       stress_target_normalized = target_normalized
 
-
     if self.FLAGS.loss_function.lower() == "mse":
       stress_error = tf.reduce_sum((stress_target_normalized - stress_output)**2, axis=1) 
     elif self.FLAGS.loss_function.lower() == "mae":
       stress_error = tf.reduce_sum(tf.math.abs(stress_target_normalized - stress_output), axis=1) 
     else:
       assert(False)
-    # stress_loss = tf.reduce_mean(stress_error[object_mask])
-    stress_loss = tf.reduce_mean(stress_error[1180:]) # Just for XLA
+
+    stress_loss = tf.reduce_mean(stress_error[object_mask])
+    # stress_loss = tf.reduce_mean(stress_error[1180:]) # Just for XLA
 
 
     if utils.predict_some_stress_only(self.FLAGS):
@@ -531,23 +565,13 @@ class Model(snt.Module):
   def _update(self, inputs, use_precomputed, per_node_network_output, normalize=True, accumulate=False):
 
 
-    # For simple MLP
-
-    # next_position_pred = inputs['target|world_pos']
-    # loss_val = self.loss(inputs, normalize, accumulate)
-    # next_stress_pred = per_node_network_output # current mean stress pred
-    # return next_position_pred, next_stress_pred, loss_val
-
-    ############
-
-
     """Integrate model outputs."""
     actuator_mask = tf.expand_dims(tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE), -1) # Where nodes are NOT actuators
     fixed_points = tf.expand_dims(tf.equal(inputs['node_type'][:, 0], common.NodeType.HANDLE), -1) # Where nodes ARE fixed
 
-    if not utils.using_dm_dataset(self.FLAGS):
 
-      # '''
+    if not utils.using_dm_dataset(self.FLAGS) and not use_precomputed:
+
       f_verts, f_verts_next, _, _ = gripper_world_pos(inputs, self.f_pc_original)
       num_f_verts_total = 1180 # tf.shape(f_verts)[0]
       num_verts_total = tf.shape(inputs['mesh_pos'])[0]
@@ -558,7 +582,6 @@ class Model(snt.Module):
       curr_pos_gt = tf.where(actuator_mask, inputs['world_pos'], finger_curr_pos_gt)
       next_pos_gt = tf.where(actuator_mask, inputs['target|world_pos'], finger_next_pos_gt)
       position_change_gt = next_pos_gt - curr_pos_gt
-      # '''
 
     else:
       position_change_gt = inputs['target|world_pos'] - inputs['world_pos'] # If not calculating from gripper pos
@@ -571,7 +594,6 @@ class Model(snt.Module):
 
       if self.FLAGS.predict_stress_change_only or self.FLAGS.predict_stress_t_only:
         position_change = inputs['world_pos'] - inputs['world_pos'] # Zero position change
-        # position_change = position_change_gt # JUST FOR NETWORK FOR GRIPPER_POS GRADIENTS
       else:
         position_change = position_change_gt
     else:
@@ -592,7 +614,8 @@ class Model(snt.Module):
     next_position_pred = curr_position + position_change
 
     zero_stress = stress_change * 0
-    stress_change = tf.where(actuator_mask, stress_change, zero_stress)
+
+    stress_change = tf.where(actuator_mask, stress_change, zero_stress) #Got rid of this for fake batching
 
 
     # next_stress_pred = stress_change  # If just predicting log next stress

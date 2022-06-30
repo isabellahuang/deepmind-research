@@ -21,6 +21,7 @@ import json
 import os
 import trimesh
 import tensorflow as tf#tensorflow.compat.v1 as tf
+import tensorflow_graphics.geometry.transformation as tfg_transformation
 
 
 # from tfdeterminism import patch
@@ -42,11 +43,14 @@ def _parse(proto, meta):
   out = {}
   for key, field in meta['features'].items():
     print("#####", key, field)
-    data = tf.io.decode_raw(features[key].values, getattr(tf, field['dtype']))
+    if field['dtype'] == 'string':
+      data = features[key].values
+
+    else:
+      data = tf.io.decode_raw(features[key].values, getattr(tf, field['dtype']))
     data = tf.reshape(data, field['shape'])
     if field['type'] == 'static':
       data = tf.tile(data, [meta['trajectory_length'], 1, 1])
-
     elif field['type'] == 'dynamic_varlen':
       length = tf.io.decode_raw(features['length_'+key].values, tf.int32)
       length = tf.reshape(length, [-1])
@@ -56,33 +60,6 @@ def _parse(proto, meta):
 
     out[key] = data
 
-  '''
-  out['tfn'] = tf.transpose(out['tfn'], [0, 2, 1])
-  num_nodes = tf.shape(out['stress'])[1]
-  for tile_key in ['gripper_pos', 'force', 'tfn']:
-    out[tile_key] = tf.tile(out[tile_key], [1, num_nodes, 1])
-
-  f_size = 590
-  f1_sign = tf.ones([meta['trajectory_length'], f_size, 1]) * -1
-  f2_sign = tf.ones([meta['trajectory_length'], f_size, 1])
-  paddings = [[0, 0], [0, num_nodes - 2*f_size], [0, 0]]
-  
-  out['f_sign'] = tf.pad(tf.concat([f1_sign, f2_sign], axis=1), paddings, "CONSTANT")
-
-  finger1_path = os.path.join('meshgraphnets', 'assets', 'finger1_face_uniform' + '.stl')
-  f1_trimesh = trimesh.load_mesh(finger1_path)
-  f1_verts_original = tf.constant(f1_trimesh.vertices, dtype=tf.float32)
-
-  finger2_path = os.path.join('meshgraphnets', 'assets', 'finger2_face_uniform' + '.stl')
-  f2_trimesh = trimesh.load_mesh(finger2_path)
-  f2_verts_original = tf.constant(f2_trimesh.vertices, dtype=tf.float32)
-  f_pc_original = tf.concat((f1_verts_original, f2_verts_original), axis=0)
-  f_pc_original_pad = tf.pad(f_pc_original, paddings[1:], "CONSTANT")
-
-  f_pc_original_expand = tf.expand_dims(f_pc_original_pad, axis=0)
-  f_pc_original_tile = tf.tile(f_pc_original_expand, [meta['trajectory_length'], 1, 1])
-  out['f_original'] = f_pc_original_tile
-  '''
   return out
 
 
@@ -107,6 +84,7 @@ def load_dataset(path, split, num_objects):
 
   tfrecords_files = sorted(split)
   print("Tfrecords_files", tfrecords_files)
+
   ds = tf.data.TFRecordDataset(tfrecords_files)
 
   ds = ds.map(functools.partial(_parse, meta=meta), num_parallel_calls=tf.data.AUTOTUNE)
@@ -122,7 +100,24 @@ def add_targets(ds, FLAGS, fields, add_history):
   """Adds target and optionally history fields to dataframe."""
   def fn(trajectory):
     out = {}
+
+
+    ########## Compute nodal velocity. trajectory['world_pos'] has shape (50, len_world_pos, 3)
+    len_world_pos = tf.shape(trajectory['world_pos'])[1] 
+    tfns = tf.squeeze(trajectory['tfn'], [-1])
+    eulers, _ = tf.split(tfns, 2, axis=1)
+    tfs_from_euler = tfg_transformation.rotation_matrix_3d.from_euler(eulers)
+    original_normal = tf.constant([1., 0., 0.], dtype=tf.float32)
+    gripper_normals = tfg_transformation.rotation_matrix_3d.rotate(original_normal, tfs_from_euler)
+    gripper_normals = tf.expand_dims(gripper_normals, axis=1)
+    g1 = tf.tile(gripper_normals * -1., [1, 590, 1])
+    g2 = tf.tile(gripper_normals, [1, 590, 1])
+    object_part = tf.tile(gripper_normals * 0.0, [1, len_world_pos - 1180, 1])
+    out["velocity"] = tf.concat([g1, g2, object_part], axis=1)
+    out["velocity"] = out["velocity"][1:-1]
+ 
     for key, val in trajectory.items():
+
 
       # Make gripper_pos a gripper_pos pair
       if "gripper_pos" in key:
@@ -142,17 +137,10 @@ def add_targets(ds, FLAGS, fields, add_history):
         # Save simulated world pos first, as ground truth of real positions
         out['sim_world_pos'] = val[1:-1]
         val_len = val.shape[0] #tf.shape(val)[0]
+
+        # Tile all world_pos to be the same throughout trajectory
         first_elem = tf.expand_dims(val[0], axis=0)
         val = tf.tile(first_elem, [val_len, 1, 1])
-
-      # '''
-      # if key in ["world_edges"]:
-      #   print(val.shape)
-      #   all_senders, all_receivers = tf.unstack(val, axis=-1)
-      #   all_senders_ragged = tf.RaggedTensor.from_tensor(all_senders, padding=0)
-      #   all_receivers_ragged = tf.RaggedTensor.from_tensor(all_receivers, padding=0)
-      #   val = tf.stack([all_senders_ragged, all_receivers_ragged], axis=-1)
-      #   val = tf.cast(val, dtype=tf.int64)
 
 
       out[key] = val[1:-1]
@@ -195,27 +183,41 @@ def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
 def batch_dataset(ds, batch_size):
   """Batches input datasets."""
 
-  ################aaaaaaaaaaaaaaaaaaaaaaaaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-  # return ds.batch(5) # You need window to give you control
   shapes = tf.compat.v1.data.get_output_shapes(ds)
   types = tf.compat.v1.data.get_output_types(ds)
+
+  def renumber(buffer, frame):
+    nodes, cells = buffer
+    new_nodes, new_cells = frame
+    return nodes + new_nodes, tf.concat([cells, new_cells+nodes], axis=1)
 
 
   def my_batch_accumulate(ds_window):
     out = {}
     for key, ds_val in ds_window.items():
-      merge = lambda prev, cur: tf.concat([prev, cur], axis=1)
       initial = tf.zeros([shapes[key][0], 1, shapes[key][2]], dtype=types[key])
 
-      out[key] = ds_val.reduce(initial, merge)
+      if key in ['mesh_edges', 'world_edges']: # cells not needed
+        num_nodes = ds_window['node_type'].map(lambda x: tf.shape(x)[1])
+
+        cells = tf.data.Dataset.zip((num_nodes, ds_val))
+        initial = (tf.constant(0, dtype=types[key]), initial)
+        _, out[key] = cells.reduce(initial, renumber)
+
+      else:
+        merge = lambda prev, cur: tf.concat([prev, cur], axis=1)
+        out[key] = ds_val.reduce(initial, merge)
+
+      out[key] = out[key][:, 1:, :]
 
     return out
     
-  ds_windows =  ds.window(5, drop_remainder=True)
-  ds_ba = ds_windows.map(my_batch_accumulate)
+  ds_windows =  ds.window(batch_size, drop_remainder=False)
+  ds_ba = ds_windows.map(my_batch_accumulate, num_parallel_calls=tf.data.AUTOTUNE)
   return ds_ba 
 
 
+  '''
   ################################
   # shapes = ds.output_shapes
   # types = ds.output_types
@@ -247,3 +249,4 @@ def batch_dataset(ds, batch_size):
     ds = ds.window(batch_size, drop_remainder=True)
     ds = ds.map(batch_accumulate, num_parallel_calls=tf.data.AUTOTUNE)
   return ds
+  '''

@@ -77,7 +77,7 @@ class GraphNetBlock(snt.Module):
     return self._update_node_features_fn(tf.concat(features, axis=-1))
 
 
-  @tf.function(jit_compile=True)
+  # @tf.function(jit_compile=True)
   def __call__(self, graph):
   # def _build(self, graph):
     """Applies GraphNetBlock and returns updated MultiGraph."""
@@ -183,7 +183,7 @@ class EncodeProcessDecode(snt.Module):
     '''
     return self._decoder_fn(graph.node_features)
 
-  @tf.function(jit_compile=True)
+  # @tf.function(jit_compile=True)
   def __call__(self, graph):
   # def _build(self, graph):
     """Encodes and processes a multigraph, and returns node features."""
