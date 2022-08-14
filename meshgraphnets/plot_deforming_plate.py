@@ -133,6 +133,8 @@ def main(unused_argv):
   66, 72, 4, 30, 81, 15, 84, 76, 69, 74, 32, 68, 95, 63, 67, 82, 21, 57, 43, 0, 40, 16, 92, 71]
   sorted_R_list = sorted_R_list[:int(len(sorted_R_list)/2)]
 
+  force, max_gt_stress = [], []
+
   def animate(num):
 
     step = (num*skip) % num_steps
@@ -189,7 +191,7 @@ def main(unused_argv):
     '''
 
     # print("{:3d} {:4f} {:8f} {:8f}".format(step, gt_force[0][0], np.max(stress), np.max(gt_stress)))
-    # print("===", step, gt_force[0][0], np.min(stress), np.max(stress), np.max(gt_stress))
+    print("===", step, gt_force[0][0], np.min(gt_stress[1180:]), np.max(stress), np.max(gt_stress))
 
     faces = rollout_data[traj]['faces'][step]
 
@@ -265,8 +267,11 @@ def main(unused_argv):
     # print(gt_stress, gt_pd_stress.shape, gt_pd_stress_calc[:100])
     # quit()
 
-    # print("===", step, gt_force[0][0], np.mean(gt_stress[1180:]), np.mean(stress[1180:]))
-    print("===", step, gt_force[0][0], np.mean(stress[1180:]), np.max(gt_stress[1180:]))
+    # print("===", step, gt_force[0][0], np.mean(stress[1180:]), np.mean(gt_stress[1180:]))
+
+    # print("===", step, gt_force[0][0], np.max(stress[1180:]), np.max(gt_stress[1180:]))
+    force.append(gt_force[0][0])
+    max_gt_stress.append(np.mean(gt_stress[1180:]))
     # print("===", step, gt_force[0][0], np.mean(gt_stress[:1180]), np.mean(gt_pd_stress[:1180]))
 
 
@@ -284,10 +289,10 @@ def main(unused_argv):
     ######################
 
 
-    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
+    ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
 
     # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
-    ax.scatter(gt_sim_pos[:, 0], gt_sim_pos[:, 1], gt_sim_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
+    # ax.scatter(gt_sim_pos[:, 0], gt_sim_pos[:, 1], gt_sim_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
 
 
 
@@ -312,13 +317,16 @@ def main(unused_argv):
 
 
 
-  _ = animation.FuncAnimation(fig, animate, frames=num_frames, interval=1000)
+  _ = animation.FuncAnimation(fig, animate, frames=num_frames, interval=100)
   plt.show(block=True)
 
   dm_dataset = 'gt_force' not in trajectory.keys()
 
   if dm_dataset:
     quit()
+
+
+
 
   # Print out final deformation and final stress predictions
   # plt.figure()
@@ -328,6 +336,11 @@ def main(unused_argv):
   gt_final_max_defs, final_max_defs = [], []
   gt_final_pd_forces, final_pd_forces = [], []
   gripper_displacements = []
+
+  plt.figure()
+  plt.scatter(force, max_gt_stress)
+  plt.show()
+
 
 
   for t_idx, trajectory in enumerate(rollout_data[:]):
@@ -350,10 +363,14 @@ def main(unused_argv):
 
     ####### Final stress comparison
     gt_final_pd_stress = np.copy(trajectory['gt_pd_stress'][-1])
+    gt_final_stress = np.copy(trajectory['gt_stress'][-1])
+
     ### Maybe final stress is different when calculated
     #gt_final_pd_stress = tet_object.get_pd_vertex_stresses(gt_final_pos)
 
-    gt_final_pd_stresses.append(gt_final_pd_stress)
+    
+    # gt_final_pd_stresses.append(gt_final_pd_stress)
+    gt_final_pd_stresses.append(gt_final_stress)
     final_pd_stress = tet_object.get_pd_vertex_stresses(final_pos)
     final_pd_stresses.append(final_pd_stress)
     final_stress = np.copy(trajectory['pred_stress'][-1])

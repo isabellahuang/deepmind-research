@@ -71,10 +71,9 @@ def sr_world_edges(world_edges):
 
   all_senders, all_receivers = tf.unstack(world_edges, axis=1)
 
-
   # JUST TO GET XLA TO WORK
-  return (tf.concat([all_senders, all_receivers], axis=0),
-          tf.concat([all_receivers, all_senders], axis=0))
+  # return (tf.concat([all_senders, all_receivers], axis=0),
+  #         tf.concat([all_receivers, all_senders], axis=0))
 
 
 
@@ -146,15 +145,20 @@ def squared_dist_point(point, others, thresh):
 
 def construct_world_edges(world_pos, node_type, FLAGS):
 
-  deformable_idx = tf.where(tf.not_equal(node_type[:, 0], NodeType.OBSTACLE))
+  # deformable_idx = tf.where(tf.not_equal(node_type[:, 0], NodeType.OBSTACLE))
+  deformable_idx = tf.where(tf.equal(node_type[:, 0], NodeType.AIRFOIL))
+
+
   actuator_idx = tf.where(tf.equal(node_type[:, 0], NodeType.OBSTACLE))
+
+
   B = tf.squeeze(tf.gather(world_pos, deformable_idx))
   A = tf.squeeze(tf.gather(world_pos, actuator_idx))
 
   A = tf.cast(A, tf.float64)
   B = tf.cast(B, tf.float64)
 
-  thresh = 0.003#0.005
+  thresh = 0.005#0.003#0.005
 
   if utils.using_dm_dataset(FLAGS):
     thresh = 0.03

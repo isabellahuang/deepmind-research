@@ -22,6 +22,7 @@ import os
 import trimesh
 import tensorflow as tf#tensorflow.compat.v1 as tf
 import tensorflow_graphics.geometry.transformation as tfg_transformation
+from meshgraphnets import utils
 
 
 # from tfdeterminism import patch
@@ -63,7 +64,7 @@ def _parse(proto, meta):
   return out
 
 
-def load_dataset(path, split, num_objects):
+def load_dataset(path, split):
   """Load dataset. Path contains all the .tfrecord files, split is a list of paths to .tfrecords"""
 
 
@@ -119,6 +120,7 @@ def add_targets(ds, FLAGS, fields, add_history):
     for key, val in trajectory.items():
 
 
+
       # Make gripper_pos a gripper_pos pair
       if "gripper_pos" in key:
         val = tf.tile(val, [1, 1, 2])
@@ -126,21 +128,28 @@ def add_targets(ds, FLAGS, fields, add_history):
       if "tfn" in key:
         val = tf.transpose(val, [0, 2, 1])
 
-  
       if "stress" in key:
         val = tf.nn.relu(val)
+
 
       # '''
       # if FLAGS.gripper_force_action_input and key in ["gripper_pos"]: # This value should never be used bc written over later
 
-      if FLAGS.gripper_force_action_input and key in ["world_pos"]:
+      if FLAGS.gripper_force_action_input and key in ["world_pos", "world_edges", "gripper_pos"]:
+
+        val_len = val.shape[0] 
+        first_elem = tf.expand_dims(val[1], axis=0) # Should probably be index 1 instead of 0
+        initial_quantity_repeated = tf.tile(first_elem, [val_len, 1, 1])
+
         # Save simulated world pos first, as ground truth of real positions
-        out['sim_world_pos'] = val[1:-1]
-        val_len = val.shape[0] #tf.shape(val)[0]
+        if key == "world_pos":
+          out['sim_world_pos'] = val[1:-1]
+
 
         # Tile all world_pos to be the same throughout trajectory
-        first_elem = tf.expand_dims(val[0], axis=0)
-        val = tf.tile(first_elem, [val_len, 1, 1])
+        if utils.predict_some_stress_only(FLAGS) or FLAGS.predict_pos_change_from_initial_only:
+          val = initial_quantity_repeated
+
 
 
       out[key] = val[1:-1]
@@ -154,6 +163,7 @@ def add_targets(ds, FLAGS, fields, add_history):
         else:
           out['target|'+key] = val[2:] # Either [1:] for full traj or [2:]
     return out
+
   return ds.map(fn, num_parallel_calls=tf.data.AUTOTUNE)
 
 
@@ -167,7 +177,7 @@ def split_and_preprocess(ds, num_epochs, noise_field, noise_scale, noise_gamma):
     noise = tf.where(mask, noise, tf.zeros_like(noise))
     frame[noise_field] += noise
     # frame['target|'+noise_field] += (1.0 - noise_gamma) * noise
-    frame['target|'+noise_field] += noise
+    # frame['target|'+noise_field] += noise # Maybe this needs to even be removed
     return frame
 
   ds = ds.flat_map(tf.data.Dataset.from_tensor_slices)

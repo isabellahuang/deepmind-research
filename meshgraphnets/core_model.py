@@ -48,7 +48,7 @@ class GraphNetBlock(snt.Module):
   def __init__(self, model_fn, name='GraphNetBlock'):
     # super(self).__init__(name=name)
     super().__init__(name=name)
-    self._model_fn = model_fn
+    self._model_fn = model_fn # mlp
 
   @snt.once
   def _initialize(self):

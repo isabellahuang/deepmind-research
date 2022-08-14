@@ -190,13 +190,19 @@ class Model(snt.Module):
       node_feature_size = 3+common.NodeType.SIZE # velocity + node type
     if self.FLAGS.force_label_node:
       node_feature_size += 1
+    if self.FLAGS.mod == "node":
+      node_feature_size += 1
+
 
     self._node_normalizer = normalization.Normalizer(
         size=node_feature_size, name='node_normalizer') 
 
     ######### Mesh edge #########
+    edge_feature_size = 8
+    if self.FLAGS.mod == "edge":
+      edge_feature_size += 1
     self._edge_normalizer = normalization.Normalizer(
-        size=8, name='edge_normalizer')  # 2*(3D coord  + length) = 8
+        size=edge_feature_size, name='edge_normalizer')  # 2*(3D coord  + length) = 8
 
     ######### World edge #########
     world_edge_feature_size = 3 + 1  # 3D coord  + length = 4
@@ -205,7 +211,7 @@ class Model(snt.Module):
       world_edge_feature_size += 1 # force = 5
 
     if self.FLAGS.simplified_predict_stress_change_only:
-      if self.FLAGS.predict_stress_t_only:
+      if self.FLAGS.predict_stress_t_only or self.FLAGS.predict_pos_change_from_initial_only:
         world_edge_feature_size = 5 # 3D coord + length + curr force
       else:
         world_edge_feature_size = 6 # 3D coord + length + curr force, change in force
@@ -236,6 +242,7 @@ class Model(snt.Module):
 
     # Accumulate raw targets
     combined_target = self.get_output_targets(initial_state)
+
     self._output_normalizer(combined_target, accumulate=True)
 
 
@@ -248,24 +255,28 @@ class Model(snt.Module):
 
     #######################################################################################
     # Calculate world pos partially from gripper_pos
-    if not utils.using_dm_dataset(self.FLAGS) and not use_precomputed:
+    if not utils.using_dm_dataset(self.FLAGS) and not use_precomputed: 
       f_verts, f_verts_next, f_force_vecs, unit_f_force_vecs = gripper_world_pos(inputs, self.f_pc_original) 
       num_f_verts_total = tf.shape(f_verts)[0]
       num_verts_total = tf.shape(inputs['mesh_pos'])[0]
       pad_diff = num_verts_total - num_f_verts_total
       paddings = [[0, pad_diff], [0, 0]]
-      finger_world_pos = tf.pad(f_verts, paddings, "CONSTANT")
-      world_pos = tf.concat([f_verts, inputs['world_pos'][1180:, :]], axis=0)
+      world_pos = tf.concat([f_verts, inputs['world_pos'][1180:, :]], axis=0) # This should be the same as inputs['world_pos']
 
     elif use_precomputed:
         world_pos = inputs['world_pos']
-        
+    
+    node_mod = inputs['node_mod']
+    node_mod_exp = tf.math.exp(node_mod)
+    node_mod_features = tf.where(actuator_mask, node_mod_exp * 0, node_mod_exp)
 
     ###################### Mesh edge features #########
+
     if utils.using_dm_dataset(self.FLAGS):
       senders, receivers = common.triangles_to_edges(inputs['cells'])
     else:
       senders, receivers = common.sr_mesh_edges(inputs['mesh_edges'])
+
 
     relative_mesh_pos = (tf.gather(inputs['mesh_pos'], senders) -
                          tf.gather(inputs['mesh_pos'], receivers))
@@ -281,10 +292,9 @@ class Model(snt.Module):
         relative_mesh_pos,
         tf.norm(relative_mesh_pos, axis=-1, keepdims=True)], axis=-1)
 
-    # mesh_edge_features = tf.tile(mesh_edge_features, [FAKE_BATCH_SIZE, 1]) # fake batching
-    # receivers = tf.tile(receivers, [FAKE_BATCH_SIZE]) # fake batching
-    # senders = tf.tile(senders, [FAKE_BATCH_SIZE]) # fake batching
-
+    if self.FLAGS.mod == "edge":
+      mesh_edge_mod_features = tf.gather(node_mod_features, senders)
+      mesh_edge_features = tf.concat([mesh_edge_features, mesh_edge_mod_features], axis=-1)
 
     mesh_edges = core_model.EdgeSet(
         name='mesh_edges',
@@ -293,9 +303,9 @@ class Model(snt.Module):
         senders=senders)
 
     #################### World edge features #########
-    if not use_precomputed and self.FLAGS.compute_world_edges:
-    # if self.FLAGS.compute_world_edges:
+    if not use_precomputed and self.FLAGS.compute_world_edges: 
       world_senders, world_receivers = common.construct_world_edges(world_pos, inputs['node_type'], self.FLAGS)
+
     else:
       world_senders, world_receivers = common.sr_world_edges(inputs['world_edges'])
 
@@ -317,10 +327,7 @@ class Model(snt.Module):
 
     relative_world_norm = tf.norm(relative_world_pos, axis=-1, keepdims=True)
 
-
-
-    if not use_precomputed:
-    # if self.FLAGS.compute_world_edges or not use_precomputed:
+    if not use_precomputed: 
       world_edge_force_feature = tf.fill(tf.shape(relative_world_norm), force_label)
       world_edge_force_change_feature = tf.fill(tf.shape(relative_world_norm), force_change_label)
 
@@ -337,11 +344,13 @@ class Model(snt.Module):
 
     elif self.FLAGS.gripper_force_action_input and not self.FLAGS.force_label_node and self.FLAGS.simplified_predict_stress_change_only:
 
-      if self.FLAGS.predict_stress_t_only:
+      if self.FLAGS.predict_stress_t_only or self.FLAGS.predict_pos_change_from_initial_only:
         world_edge_features = tf.concat([
             relative_world_pos,
             relative_world_norm,
             world_edge_force_feature], axis=-1)
+
+
       else:
         world_edge_features = tf.concat([
             relative_world_pos,
@@ -353,10 +362,6 @@ class Model(snt.Module):
           relative_world_pos,
           relative_world_norm], axis=-1)
 
-
-    # world_edge_features = tf.tile(world_edge_features, [FAKE_BATCH_SIZE, 1]) # fake batching
-    # world_receivers = tf.tile(world_receivers, [FAKE_BATCH_SIZE]) # fake batching
-    # world_senders = tf.tile(world_senders, [FAKE_BATCH_SIZE]) # fake batching
 
 
     world_edges = core_model.EdgeSet(
@@ -392,8 +397,6 @@ class Model(snt.Module):
     ##########
     node_type = tf.one_hot(inputs['node_type'][:, 0], common.NodeType.SIZE)
 
-    if not utils.using_dm_dataset(self.FLAGS):
-      node_mod = inputs['node_mod'][:,:]
 
     # Stress 
     if self.FLAGS.log_stress_t: #TODO this should be false when predicting change in stress
@@ -404,7 +407,8 @@ class Model(snt.Module):
 
 
     if not utils.stress_t_as_node_feature(self.FLAGS):
-      node_features = tf.concat([velocity, node_type], axis=-1)
+      node_features = tf.concat([velocity, node_type], axis=-1) # This one
+
     else:
       node_features = tf.concat([velocity, stresses, node_type], axis=-1)
 
@@ -412,10 +416,8 @@ class Model(snt.Module):
       node_force = tf.fill(tf.shape(inputs['stress']), force_label)
       node_features = tf.concat([node_force, node_features], axis=-1)
 
-    # '''
-
-    # Fake batching
-    # node_features = tf.tile(node_features, [FAKE_BATCH_SIZE, 1])
+    if self.FLAGS.mod == "node":
+      node_features = tf.concat([node_features, node_mod_features], axis=-1)
 
 
     return core_model.MultiGraph(
@@ -453,6 +455,7 @@ class Model(snt.Module):
     target_position = inputs['target|world_pos']
     target_position_change = target_position - cur_position
 
+
     # Target stress
     if self.FLAGS.predict_log_stress_t_only:
       target_stress_change = tf.math.log(inputs['stress'] + 1)
@@ -474,9 +477,21 @@ class Model(snt.Module):
       target_stress_change = inputs['target|stress']
       combined_target = tf.concat([target_position_change, target_stress_change], 1)
 
+    if self.FLAGS.predict_pos_change_from_initial_only:
+      target_position_change = inputs['sim_world_pos'] - inputs['world_pos'] # where inputs['world_pos'] is the initial world pos at the start of trajectory
+      zero_position_change = inputs['world_pos'] - inputs['world_pos']
+      object_mask = tf.expand_dims(tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE), -1)
+      target_position_change_from_initial = tf.where(object_mask, target_position_change, zero_position_change)
+
+    if utils.predict_some_def_only(self.FLAGS):
+      combined_target = target_position_change_from_initial
 
     if utils.predict_some_stress_only(self.FLAGS):
       combined_target = target_stress_change
+
+    if utils.predict_stress_and_def(self.FLAGS):
+      combined_target = tf.concat([target_position_change_from_initial, target_stress_change], 1)
+
 
     return combined_target
 
@@ -488,6 +503,8 @@ class Model(snt.Module):
     # Get targets
     combined_target = self.get_output_targets(inputs)
 
+
+
     # Get prediction
     graph = self._build_graph(inputs, use_precomputed, is_training=accumulate) # is_training used to always be True -> accumulate always True
 
@@ -497,11 +514,16 @@ class Model(snt.Module):
     if normalize:
       if utils.predict_some_stress_only(self.FLAGS):
         stress_output = network_output
+      elif utils.predict_some_def_only(self.FLAGS):
+        object_output = network_output
       else:
         object_output, stress_output = tf.split(network_output, [3, 1], 1)
     else:
       if utils.predict_some_stress_only(self.FLAGS):
         stress_output = self._output_normalizer.inverse(network_output)
+      elif utils.predict_some_def_only(self.FLAGS):
+        object_output = self._output_normalizer.inverse(network_output)
+
       else:
         object_output, stress_output = tf.split(self._output_normalizer.inverse(network_output), [3,1], 1)
 
@@ -522,43 +544,66 @@ class Model(snt.Module):
       target_normalized = combined_target
 
 
-    # Fake batching
-    # target_normalized = tf.tile(target_normalized, [FAKE_BATCH_SIZE, 1])
-
-
     ### OBJECT POS LOSSES ######
-    if not utils.predict_some_stress_only(self.FLAGS):
-      object_target_normalized, stress_target_normalized = tf.split(target_normalized, [3, 1], 1)
+    if utils.predict_some_def_only(self.FLAGS):
+      object_target_normalized = target_normalized
       object_error = tf.reduce_sum((object_target_normalized - object_output)**2, axis=1) 
+      object_loss = tf.reduce_mean(object_error[object_mask])
+      loss = object_loss
 
-      if self.FLAGS.gripper_force_action_input: # Then we care about position change of gripper too
-        object_loss = tf.reduce_mean(object_error)
-      else:
-        object_loss = tf.reduce_mean(object_error[object_mask])
+      '''
+      elif not utils.predict_some_stress_only(self.FLAGS):
+        object_target_normalized, stress_target_normalized = tf.split(target_normalized, [3, 1], 1)
+        object_error = tf.reduce_sum((object_target_normalized - object_output)**2, axis=1) 
+
+        if self.FLAGS.gripper_force_action_input: # Then we care about position change of gripper too
+          object_loss = tf.reduce_mean(object_error)
+        else:
+          object_loss = tf.reduce_mean(object_error[object_mask])
+      '''
 
     ### STRESS LOSSES #####
-    else:
+    elif utils.predict_some_stress_only(self.FLAGS):
       stress_target_normalized = target_normalized
 
-    if self.FLAGS.loss_function.lower() == "mse":
-      stress_error = tf.reduce_sum((stress_target_normalized - stress_output)**2, axis=1) 
-    elif self.FLAGS.loss_function.lower() == "mae":
-      stress_error = tf.reduce_sum(tf.math.abs(stress_target_normalized - stress_output), axis=1) 
-    else:
-      assert(False)
+      if self.FLAGS.loss_function.lower() == "mse":
+        stress_error = tf.reduce_sum((stress_target_normalized - stress_output)**2, axis=1) 
+      elif self.FLAGS.loss_function.lower() == "mae":
+        stress_error = tf.reduce_sum(tf.math.abs(stress_target_normalized - stress_output), axis=1) 
+      else:
+        assert(False)
 
-    stress_loss = tf.reduce_mean(stress_error[object_mask])
-    # stress_loss = tf.reduce_mean(stress_error[1180:]) # Just for XLA
+      # Old simple way, takes loss over entire object even if it's not under stress
+      stress_loss = tf.reduce_mean(stress_error[object_mask])
+      loss = stress_loss
 
 
+    elif utils.predict_stress_and_def(self.FLAGS):
+      object_target_normalized, stress_target_normalized = tf.split(target_normalized, [3, 1], 1)
+      if self.FLAGS.loss_function.lower() == "mse":
+        stress_error = tf.reduce_sum((stress_target_normalized - stress_output)**2, axis=1) 
+      elif self.FLAGS.loss_function.lower() == "mae":
+        stress_error = tf.reduce_sum(tf.math.abs(stress_target_normalized - stress_output), axis=1) 
+      else:
+        assert(False)
+
+      stress_loss = tf.reduce_mean(stress_error[object_mask])
+
+      ########################
+
+      object_error = tf.reduce_sum((object_target_normalized - object_output)**2, axis=1) 
+      object_loss = tf.reduce_mean(object_error[object_mask])
+      loss =  object_loss + stress_loss
+
+
+    '''
     if utils.predict_some_stress_only(self.FLAGS):
       loss = stress_loss
-    elif self.FLAGS.predict_pos_change_only:
+    elif self.FLAGS.predict_pos_change_only or self.FLAGS.predict_pos_change_from_initial_only:
       loss = object_loss
     else:
       loss = object_loss + stress_loss
-
-
+    ''' 
     return loss
 
 
@@ -591,11 +636,15 @@ class Model(snt.Module):
     if utils.predict_some_stress_only(self.FLAGS): # In this case
       stress_change = self._output_normalizer.inverse(per_node_network_output)
 
-
       if self.FLAGS.predict_stress_change_only or self.FLAGS.predict_stress_t_only:
         position_change = inputs['world_pos'] - inputs['world_pos'] # Zero position change
       else:
         position_change = position_change_gt
+
+    elif utils.predict_some_def_only(self.FLAGS):
+      position_change = self._output_normalizer.inverse(per_node_network_output)
+      stress_change = inputs['stress'] - inputs['stress'] # Zero stress change
+
     else:
       position_change, stress_change = tf.split(self._output_normalizer.inverse(per_node_network_output), [3,1], 1)
 
@@ -603,9 +652,13 @@ class Model(snt.Module):
     if not self.FLAGS.gripper_force_action_input:
       position_change = tf.where(actuator_mask, position_change, position_change_gt)
 
+
     # If there are fixed points, update to the same position. Applicable currently only to deep mind dataset where there are fp
     zero_position_change = position_change * 0
     position_change = tf.where(fixed_points, zero_position_change, position_change)
+
+    position_change = tf.where(actuator_mask, position_change, zero_position_change)
+
 
 
     # Integrate forward
@@ -615,8 +668,8 @@ class Model(snt.Module):
 
     zero_stress = stress_change * 0
 
-    stress_change = tf.where(actuator_mask, stress_change, zero_stress) #Got rid of this for fake batching
 
+    stress_change = tf.where(actuator_mask, stress_change, zero_stress) #Got rid of this for fake batching
 
     # next_stress_pred = stress_change  # If just predicting log next stress
 
@@ -643,6 +696,8 @@ class Model(snt.Module):
 
     # Get loss val
     loss_val = self.loss(inputs, use_precomputed, normalize, accumulate)
+
+
 
 
     return next_position_pred, next_stress_pred, loss_val

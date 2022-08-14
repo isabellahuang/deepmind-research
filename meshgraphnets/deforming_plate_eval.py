@@ -34,7 +34,6 @@ from meshgraphnets import deforming_plate_model
 from meshgraphnets import common
 
 
-
 def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumulate):
   """Rolls out a model trajectory."""
   mask = tf.equal(initial_state['node_type'][:, 0], NodeType.NORMAL)
@@ -45,14 +44,18 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
 
 
     curr_stress_feed = curr_stress
-    if FLAGS.predict_log_stress_t_only or FLAGS.predict_stress_t_only: # it shouldnt have access to inputs['stress'][step] though
+    if FLAGS.predict_log_stress_t_only or FLAGS.predict_stress_t_only: # it shouldnt have access to inputs['stress'][step] though, but needed to calculate loss
       curr_stress_feed = inputs['stress'][step]
+
+    if FLAGS.predict_pos_change_from_initial_only:
+      cur_pos = inputs['world_pos'][step]
 
     model_input_dict = {**initial_state,
                         'world_pos': cur_pos, 
                         'target|world_pos': inputs['target|world_pos'][step],
                         'stress': curr_stress_feed, #in raw units
-                        'target|stress': inputs['target|stress'][step]}
+                        'target|stress': inputs['target|stress'][step],
+                        'sim_world_pos': inputs['sim_world_pos'][step]}
 
     '''
     if not utils.using_dm_dataset(FLAGS):
@@ -66,6 +69,7 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
     # if not utils.using_dm_dataset(FLAGS):
       model_input_dict['world_edges'] = inputs['world_edges'][step] # Use if not trained with world edges in graph
 
+
     if FLAGS.gripper_force_action_input:
       model_input_dict['force'] = inputs['force'][step]
       model_input_dict['target|force'] = inputs['target|force'][step]
@@ -78,10 +82,6 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
     next_pos_pred, next_stress_pred, loss_val = model(model_input_dict, use_precomputed, normalize, accumulate)
 
 
-
-
-    trajectory = trajectory.write(step, cur_pos)
-
     if FLAGS.predict_log_stress_t_only or FLAGS.predict_stress_t_only:
       log_stress = tf.math.log(next_stress_pred + 1) # Next stress pred is actually stress now, at time t
       raw_stress = next_stress_pred
@@ -89,7 +89,14 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
       log_stress = tf.math.log(curr_stress + 1)
       raw_stress = curr_stress
 
+
     stress_trajectory = stress_trajectory.write(step, raw_stress)
+
+    if FLAGS.predict_pos_change_from_initial_only:
+
+      trajectory = trajectory.write(step, next_pos_pred)
+    else:
+      trajectory = trajectory.write(step, cur_pos)
 
     # Save to loss trajectory
     loss_trajectory = loss_trajectory.write(step, loss_val)
@@ -224,6 +231,9 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
   ####
 
+  # Use partial trajectory
+  inputs = {k: v[:30] for k, v in inputs.items()}
+
   initial_state = {k: v[0] for k, v in inputs.items()}
 
   # Use this only when calculating gradients for grasp refinement
@@ -232,23 +242,36 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   if not num_steps:
     num_steps = inputs['node_type'].shape[0] # Length of trajectory
 
+
   pos_prediction, stress_prediction, rollout_losses = _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumulate)
+  stress_cutoff = 500.0
+
 
 
   # stress_prediction is in log
   log_gt_stress = tf.math.log(inputs['stress'] + 1)
 
-  pos_error = tf.reduce_mean(tf.reduce_sum(((pos_prediction - inputs['world_pos'][:num_steps]) ** 2), axis=-1), axis=-1) 
-  baseline_pos_error = tf.reduce_mean(tf.reduce_sum(((inputs['world_pos'][:num_steps] - inputs['world_pos'][0]) ** 2), axis=-1), axis=-1)
+  # pos_error = tf.reduce_mean(tf.reduce_sum(((pos_prediction - inputs['sim_world_pos'][:num_steps]) ** 2), axis=-1)[:, 1180:], axis=-1) 
+  # baseline_pos_error = tf.reduce_mean(tf.reduce_sum(((inputs['sim_world_pos'][:num_steps] - inputs['sim_world_pos'][0]) ** 2), axis=-1)[:, 1180:], axis=-1)
 
-  # Raw stress errors
-  stress_error = tf.reduce_mean(tf.reduce_sum(((stress_prediction - inputs['stress'][:num_steps]) ** 2), axis=-1), axis=-1) # new way
-  baseline_stress_error = tf.reduce_mean(tf.reduce_sum(((inputs['stress'][:num_steps] - inputs['stress'][0]) ** 2), axis=-1), axis=-1) # new way
+  # MAE instead
+  pos_difference_norm = tf.norm(pos_prediction - inputs['sim_world_pos'][:num_steps], axis=-1) #(48, num_nodes)
+  baseline_difference_norm = tf.norm(inputs['sim_world_pos'][:num_steps] - inputs['sim_world_pos'][0], axis=-1) #(48, num_nodes)
 
-  # print("After having validated")
-  # print(stress_prediction[20])
-  # print(tf.reduce_sum(stress_prediction[20]))
-  # print(inputs['stress'][20])
+  # Set difference to zero when stress is under threshold
+  pos_difference_norm = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, pos_difference_norm, tf.zeros_like(pos_difference_norm))[:, 1180:] # (48, num_nodes - 1180)
+  baseline_difference_norm = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, baseline_difference_norm, tf.zeros_like(baseline_difference_norm))[:, 1180:]
+
+  pos_error = tf.reduce_mean(pos_difference_norm, axis=-1) # (48,)
+  baseline_pos_error = tf.reduce_mean(baseline_difference_norm, axis=-1) # (48,)
+
+  # Raw stress errors, in real units
+  # stress_error = tf.reduce_mean(tf.reduce_sum(((stress_prediction - inputs['stress'][:num_steps]) ** 2), axis=-1)[:, 1180:], axis=-1) # don't include the grippers
+  # baseline_stress_error = tf.reduce_mean(tf.reduce_sum(((inputs['stress'][:num_steps] - inputs['stress'][0]) ** 2), axis=-1)[:, 1180:], axis=-1) # don't inculde the grippers
+
+  # MAE instead
+  stress_error = tf.reduce_mean(tf.reduce_sum((tf.math.abs(stress_prediction - inputs['stress'][:num_steps])), axis=-1)[:, 1180:], axis=-1) # don't include the grippers
+  baseline_stress_error = tf.reduce_mean(tf.reduce_sum((tf.math.abs(inputs['stress'][:num_steps] - inputs['stress'][0])), axis=-1)[:, 1180:], axis=-1) # don't inculde the grippers
 
   scalars = {}
   
@@ -269,9 +292,68 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   scalars['baseline_stress_mean_error'] = tf.reduce_mean(baseline_stress_error)
   scalars['baseline_stress_final_error'] = baseline_stress_error[-1]
 
+  deformations = pos_prediction - inputs['world_pos']
+  actual_deformations = inputs['sim_world_pos'] - inputs['world_pos']
+  deformation_norms = tf.norm(deformations, axis=-1)
+  actual_deformation_norms = tf.norm(actual_deformations, axis=-1)
+
+  # Get def percent errors
+
+  difference_in_deformation = actual_deformations - deformations
+  difference_in_deformation_norms = tf.norm(difference_in_deformation, axis=-1)
+  eps = 1e-10
+  actual_deformation_norms_no_zeros = tf.where(tf.abs(actual_deformation_norms) < eps, eps * tf.ones_like(actual_deformation_norms), actual_deformation_norms)
+  deformation_norms_percent_error = tf.math.divide(difference_in_deformation_norms, actual_deformation_norms_no_zeros) # (start at 2: otherwise lots of zero entries)
+
+  # Mask out deformation when object not in contact (e.g. swaying in the wind)
+  deformation_norms_percent_error = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms_percent_error, tf.zeros_like(deformation_norms_percent_error))
+  deformation_norms_percent_error = deformation_norms_percent_error[2:, 1180:]
+
+  # Get stress percent errors
+  stress_prediction_abs_error = tf.math.abs(stress_prediction - inputs['stress'])
+  actual_stress_no_zeros = tf.where(tf.abs(inputs['stress']) < eps, eps * tf.ones_like(inputs['stress']), inputs['stress'])
+  stress_percent_error = tf.math.divide(stress_prediction_abs_error, actual_stress_no_zeros)
+  stress_percent_error = tf.where(inputs['stress'] > stress_cutoff, stress_percent_error, tf.zeros_like(stress_percent_error))
+  stress_percent_error = stress_percent_error[2:, 1180:]
+
+  nodes_under_stress = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff)
+  '''
+  print(nodes_under_stress.shape)
+  print(tf.gather(tf.squeeze(inputs['stress'], -1), nodes_under_stress).shape)
+  print(tf.gather(deformation_norms, nodes_under_stress).shape)
+  print(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms_no_zeros, tf.zeros_like(actual_deformation_norms_no_zeros)).shape)
+  print(stress_prediction.shape)
+  '''
+  # (19402, 2)
+  # (19402, 2, 2332)
+  # (19402, 2, 2332)
+  # (48, 2332)
+  # (48, 2332, 1)
+
+  ### Deformation norms under stress only
+  squeezed_stress = tf.squeeze(inputs['stress'], -1)
+  squeezed_stress_prediction = tf.squeeze(stress_prediction, -1)
+
+  nodes_under_stress_only = tf.where(squeezed_stress > stress_cutoff, tf.ones_like(deformation_norms), tf.zeros_like(deformation_norms))
+  deformation_norms_under_stress_only = tf.where(squeezed_stress > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))
+  actual_deformation_norms_under_stress_only = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms, tf.zeros_like(actual_deformation_norms))
+
+  sum_nodes_under_stress = tf.reduce_sum(nodes_under_stress_only, axis=-1)
+  sum_nodes_under_stress = tf.where(tf.equal(sum_nodes_under_stress, 0), tf.ones_like(sum_nodes_under_stress), sum_nodes_under_stress)
+
+  mean_deformation_under_stress_only = tf.math.divide(tf.reduce_sum(deformation_norms_under_stress_only, axis=-1), sum_nodes_under_stress)
+  mean_actual_deformation_under_stress_only = tf.math.divide(tf.reduce_sum(actual_deformation_norms_under_stress_only, axis=-1), sum_nodes_under_stress)
+
+  ### Stress under stress only
+  stress_under_stress_only = tf.where(squeezed_stress > stress_cutoff, squeezed_stress_prediction, tf.zeros_like(squeezed_stress_prediction))
+  actual_stress_under_stress_only = tf.where(squeezed_stress > stress_cutoff, squeezed_stress, tf.zeros_like(squeezed_stress))
+
+  mean_stress_under_stress_only = tf.math.divide(tf.reduce_sum(stress_under_stress_only, axis=-1), sum_nodes_under_stress)
+  actual_mean_stress_under_stress_only = tf.math.divide(tf.reduce_sum(actual_stress_under_stress_only, axis=-1), sum_nodes_under_stress)
 
   traj_ops = {
       'faces': inputs['cells'],
+      'name': inputs['name'],
       'node_type': inputs['node_type'],
       'mesh_pos': inputs['mesh_pos'],
       'gt_pos': inputs['world_pos'],
@@ -279,7 +361,27 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
       'pred_pos': pos_prediction,
       'pred_stress': stress_prediction,
       'sim_world_pos': inputs['sim_world_pos'] if 'sim_world_pos' in inputs.keys() else inputs['world_pos'],
-      'mean_pred_stress': tf.reduce_mean(stress_prediction),
+      'mean_pred_stress': tf.reduce_mean(stress_prediction[:, 1180:]),
+      'max_pred_stress': tf.reduce_max(stress_prediction[:, 1180:]),
+
+      'mean_actual_stress': tf.reduce_mean(inputs['stress'][:num_steps, 1180:]),
+      'max_actual_stress': tf.reduce_max(inputs['stress'][:num_steps, 1180:]),
+
+      'mean_actual_stress_under_stress_only': tf.reduce_mean(actual_mean_stress_under_stress_only),
+      'mean_pred_stress_under_stress_only': tf.reduce_mean(mean_stress_under_stress_only),
+
+      'mean_deformation_norm': tf.reduce_mean(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))[:, 1180:]),
+      'max_deformation_norm': tf.reduce_max(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))[:, 1180:]),
+
+      'mean_actual_deformation_norm': tf.reduce_mean(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms_no_zeros, tf.zeros_like(actual_deformation_norms_no_zeros))[:, 1180:]),
+      'max_actual_deformation_norm': tf.reduce_max(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms_no_zeros, tf.zeros_like(actual_deformation_norms_no_zeros))[:, 1180:]),
+      
+      'mean_deformation_norm_under_stress_only': tf.reduce_mean(mean_deformation_under_stress_only),
+      'mean_actual_deformation_norm_under_stress_only': tf.reduce_mean(mean_actual_deformation_under_stress_only),
+
+
+      'mean_deformation_percent_error': tf.reduce_mean(deformation_norms_percent_error),
+      'mean_stress_percent_error': tf.reduce_mean(stress_percent_error),
       # 'avg_gt_stress': tf.shape(log_gt_stress[:num_steps]), #(n_horizon, n_nodes, 1)
       # 'avg_pred_stress': tf.shape(stress_prediction) #(n_horizon, n_nodes, 1)
       'avg_gt_stress': tf.reduce_mean(tf.squeeze(log_gt_stress[:num_steps], axis=-1), axis=-1), #(n_horizon, n_nodes, 1)

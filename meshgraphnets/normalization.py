@@ -56,7 +56,7 @@ class Normalizer(snt.Module):
 
     """Normalizes input data and accumulates statistics."""
     # update_op = tf.no_op()
-    
+
     if accumulate and self._num_accumulations < self._max_accumulations:
       self._accumulate(batched_data)
       # stop accumulating after a million updates, to prevent accuracy issues

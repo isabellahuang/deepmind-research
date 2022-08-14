@@ -2,32 +2,52 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import os
 import trimesh
+import tensorflow as tf 
+
+
+import sys
+sys.path.append('/home/isabella/deformable_object_grasping/graspsampling-py-internship1')
+import graspsampling
+from graspsampling import sampling, utilities, hands, io
+sys.path.append('/home/isabella/deformable_object_grasping/isabella')
+import data_creator_utils as dcu
 
 def get_output_size(FLAGS):
-	if predict_some_stress_only(FLAGS):
-		return 1 
-	else:
-		return 4 # velocity and stress
+    if predict_some_stress_only(FLAGS):
+        return 1 
+    elif predict_some_def_only(FLAGS):
+        return 3
+    else:
+        return 4 # velocity and stress
 
 def check_consistencies(FLAGS):
-	if FLAGS.predict_stress_change_only:
-		assert(FLAGS.gripper_force_action_input)
+    if FLAGS.predict_stress_change_only:
+        assert(FLAGS.gripper_force_action_input)
 
+def predict_stress_and_def(FLAGS):
+    if FLAGS.predict_stress_t_only and FLAGS.predict_pos_change_from_initial_only:
+        return True 
+    return False
 
 def predict_some_stress_only(FLAGS):
-	if FLAGS.predict_log_stress_t_only or FLAGS.predict_log_stress_t1_only or FLAGS.predict_log_stress_change_only or FLAGS.predict_stress_change_only or FLAGS.predict_stress_t_only:
-		assert(not FLAGS.predict_pos_change_only)
-		return True
-	return False
+    if (FLAGS.predict_log_stress_t_only or FLAGS.predict_log_stress_t1_only or FLAGS.predict_log_stress_change_only or FLAGS.predict_stress_change_only or FLAGS.predict_stress_t_only) and not predict_stress_and_def(FLAGS):
+        assert(not FLAGS.predict_pos_change_only)
+        return True
+    return False
+
+def predict_some_def_only(FLAGS):
+    if FLAGS.predict_pos_change_from_initial_only and not predict_stress_and_def(FLAGS):
+        return True 
+    return False
 
 
 def stress_t_as_node_feature(FLAGS):
-	if FLAGS.predict_log_stress_t_only or FLAGS.predict_pos_change_only or FLAGS.predict_stress_t_only:
-		return False
-	return True
+    if FLAGS.predict_log_stress_t_only or FLAGS.predict_pos_change_only or FLAGS.predict_stress_t_only or FLAGS.predict_pos_change_from_initial_only:
+        return False
+    return True
 
 def using_dm_dataset(FLAGS):
-	return 'deforming_plate_data' in FLAGS.dataset_dir
+    return 'deforming_plate_data' in FLAGS.dataset_dir
 
 
 def get_global_deformation_metrics(undeformed_mesh, deformed_mesh, get_field=False):
@@ -142,7 +162,6 @@ def f_verts_at_pos(tfn, gripper_pos):
 
 
 def classification_accuracy_threshold(predicted, actual, percentile):
-
   threshold = np.percentile(actual, percentile)
   num_g = len(predicted)
   assert(num_g == len(actual))
@@ -159,23 +178,80 @@ def classification_accuracy_threshold(predicted, actual, percentile):
   # print("Actual", np.min(actual), threshold, np.max(actual))
   # print("Predicted", np.min(predicted), threshold, np.max(predicted))
 
-  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
+  # return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
+
+  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted_top) + len(predicted_bottom)
+
+
 
 def classification_accuracy_ranking(predicted, actual, percentile):
+  ''' How many of the top and bottom 30 percent of predicted are in the top and bottom 50 of actual'''
+
+  percentile = min(percentile, 100-percentile)
+
   actual_threshold = np.percentile(actual, percentile)
   pred_threshold = np.percentile(predicted, percentile)
+
+  pred_threshold_top = np.percentile(predicted, 100-percentile)
+  pred_threshold_bottom = np.percentile(predicted, percentile)
   num_g = len(predicted)
   assert(num_g == len(actual))
 
   actual_top = [k for k in range(num_g) if actual[k] >= actual_threshold]
   actual_bottom = [k for k in range(num_g) if actual[k] < actual_threshold]
 
-  predicted_top = [k for k in range(num_g) if predicted[k] >= pred_threshold]
-  predicted_bottom = [k for k in range(num_g) if predicted[k] < pred_threshold]
+  predicted_top = [k for k in range(num_g) if predicted[k] >= pred_threshold_top]
+  predicted_bottom = [k for k in range(num_g) if predicted[k] < pred_threshold_bottom]
 
   predicted_bottom_correct = [k for k in predicted_bottom if k in actual_bottom]
   predicted_top_correct = [k for k in predicted_top if k in actual_top]
 
   # print("Actual", np.min(actual), threshold, np.max(actual))
   # print("Predicted", np.min(predicted), threshold, np.max(predicted))
-  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
+
+  # quit()
+
+  # return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
+  return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted_top) + len(predicted_bottom)
+
+
+def sample_grasps(obj_stl_file, number_of_grasps):
+
+    grasp_sampling_object = utilities.instantiate_mesh(file=obj_stl_file, scale=1.0).bounding_box_oriented
+
+    gripper = hands.create_gripper('panda_visual')
+
+    cls_sampler = graspsampling.sampling.AntipodalSampler
+    sampler = cls_sampler(gripper, grasp_sampling_object, 0.0, 4) # Antipodal
+
+    results, grasp_success = graspsampling.sampling.collision_free_grasps(gripper, grasp_sampling_object, sampler, number_of_grasps)
+    if len(results) == 0:
+      print("Grasping sampling failed")
+    results = np.asarray(results)
+    print("+++++", np.mean(results))
+    transformation_matrices = dcu.poses_wxyz_to_mats(results)
+    return transformation_matrices
+
+def get_mtx_from_h5(h5file):
+    import h5py
+    f = h5py.File(h5file, 'r')
+    poses = f['poses'][:]
+    f.close()
+    transformation_matrices = dcu.poses_wxyz_to_mats(poses)
+    return transformation_matrices
+
+def tmtx_to_tensor(transform):
+
+    gripper_r = R.from_matrix(transform[:3,:3])
+    gripper_t = transform[:3, 3]
+    gym_r = R.from_matrix(np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]]))
+
+    # Get total transformation
+    total_mtx = np.matmul(np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]]), transform[:3,:3])
+    total_r = R.from_matrix(total_mtx)
+    total_t = gym_r.apply(gripper_t) + [0, 1, 0]
+    euler = total_r.as_euler('xyz')
+    candidate_tfn = np.expand_dims(np.expand_dims(np.concatenate((euler, total_t)), 0), 0)
+    candidate_tfn_tensor = tf.convert_to_tensor(candidate_tfn, dtype=tf.float32)
+    candidate_tfn_tensor = tf.Variable(tf.tile(candidate_tfn_tensor, [48, 1, 1]))
+    return candidate_tfn_tensor
