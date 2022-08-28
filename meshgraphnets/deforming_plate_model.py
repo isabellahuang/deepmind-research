@@ -84,18 +84,14 @@ def gripper_world_pos(inputs, f_pc_original):
   num_verts_per_f = f_verts.shape[0] // 2
 
 
-  # f1_force_vecs = tf.tile(tf.expand_dims(-1. * gripper_normal, axis=0), [num_verts_per_f, 1]) * (inputs['target|force'] - inputs['force']) # old
   f1_force_vecs = tf.tile(-1. * gripper_normal,  [num_verts_per_f, 1]) * (inputs['target|force'] - inputs['force'])
 
-  # f2_force_vecs = tf.tile(tf.expand_dims(gripper_normal, axis=0), [num_verts_per_f, 1]) * (inputs['target|force'] - inputs['force']) # old
   f2_force_vecs = tf.tile(gripper_normal, [num_verts_per_f, 1]) * (inputs['target|force'] - inputs['force'])
 
   f_force_vecs = tf.concat((f1_force_vecs, f2_force_vecs), axis=0)
 
-  # unit_f1_force_vecs = tf.tile(tf.expand_dims(-1. * gripper_normal, axis=0), [num_verts_per_f, 1])  # old
   unit_f1_force_vecs = tf.tile(-1. * gripper_normal, [num_verts_per_f, 1]) 
 
-  # unit_f2_force_vecs = tf.tile(tf.expand_dims(gripper_normal, axis=0), [num_verts_per_f, 1]) # old
   unit_f2_force_vecs = tf.tile(gripper_normal, [num_verts_per_f, 1]) 
 
   unit_f_force_vecs = tf.concat((unit_f1_force_vecs, unit_f2_force_vecs), axis=0)
@@ -216,6 +212,9 @@ class Model(snt.Module):
       else:
         world_edge_feature_size = 6 # 3D coord + length + curr force, change in force
 
+    if self.FLAGS.force_label_node:
+      world_edge_feature_size -= 1 
+
     self._world_edge_normalizer = normalization.Normalizer(
         size=world_edge_feature_size, name='world_edge_normalizer') 
 
@@ -315,6 +314,7 @@ class Model(snt.Module):
       # Force at nodes or edges
       if self.FLAGS.node_total_force_t:
         force_label = inputs['force'][0,0] # Label every node/edge with total gripper force
+        force_change_label = inputs['target|force'][0,0] - inputs['force'][0,0]
 
       else:
         force_label = inputs['force'][0,0] / (0.5 * tf.cast(tf.shape(world_senders)[0], tf.float32)) # Label every node/world edge with total gripper force / num contacts

@@ -48,8 +48,9 @@ SEED = 55
 ABC_DATASET_FOLDER = os.path.join("..", "..", "abc_dataset", "abc_dataset", "0-9999")
 SIMPLE_GEOMETRIC_DATASET_FOLDER = os.path.join("..", "..", "deformable_object_grasping", "simple_geometric_dataset")
 CONTAINER_DATASET_FOLDER = os.path.join("..", "..", "deformable_object_grasping", "container_dataset")
+REAL_FRUITS_DATASET_FOLDER = os.path.join("..", "..", "deformable_object_grasping", "real_fruits_dataset")
 
-DATASET_FOLDER = CONTAINER_DATASET_FOLDER
+DATASET_FOLDER = REAL_FRUITS_DATASET_FOLDER
 
 os.environ['PYTHONHASHSEED'] = str(SEED)
 np.random.seed(SEED)
@@ -96,6 +97,7 @@ flags.DEFINE_float('learning_rate', 1e-4, 'Message passing steps')
 flags.DEFINE_float('noise_scale', 3e-3, 'Noise scale on world pos')
 
 flags.DEFINE_bool('noise_on_adjacent_step', True, 'Add perturbation to both t and t + 1 step. If False, add only to t step.')
+flags.DEFINE_bool('layernorm', False, 'Use layer norm')
 
 flags.DEFINE_bool('gripper_force_action_input', True, 'Change in gripper force as action input')
 flags.DEFINE_enum('mod', 'none', ['none', 'node', 'edge'],
@@ -117,7 +119,7 @@ flags.DEFINE_bool('predict_log_stress_t1', False, 'Predict the log stress at t1'
 flags.DEFINE_bool('predict_log_stress_change_t1', False, 'Predict the log of stress change from t to t1')
 flags.DEFINE_bool('predict_stress_change_t1', False, 'Predict the stress change from t to t1')
 
-
+flags.DEFINE_bool('predict_incremental', False,' Predict change in stress and in pos, with action as change in force')
 flags.DEFINE_bool('predict_log_stress_t_only', False, 'Do not make deformation predictions. Only predict stress at time t')
 flags.DEFINE_bool('predict_log_stress_t1_only', False, 'Do not make deformation predictions. Only predict stress at time t1')
 flags.DEFINE_bool('predict_log_stress_change_only', False, 'Do not make deformation predictions. Only predict stress at time t1')
@@ -166,15 +168,15 @@ def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=Fal
   noise_field = params['noise_field']
   noise_scale = params['noise']
 
-  # ds = ds.take(2)
-  # '''
+  # ds = ds.take(10)
+  '''
   if not test:
     ds = ds.skip(20)
     ds = ds.take(FLAGS.num_training_trajectories) # This is the number of trajectories seen during 
   else:
     # ds = ds.skip(FLAGS.num_training_trajectories)
     ds = ds.take(20) # ds.take(FLAGS.num_testing_trajectories)
-  # '''
+  '''
 
   '''
 
@@ -233,7 +235,10 @@ def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=Fal
 
     # Assign distributed force to each edge
     num_unique_world_edges = tf.shape(frame['world_edges'])[1]
-    force_features = tf.fill(tf.shape(frame['world_edges']), frame['force'][0][0][0] / tf.cast(num_unique_world_edges, dtype=tf.float32))
+    if FLAGS.node_total_force_t:
+      force_features = tf.fill(tf.shape(frame['world_edges']), frame['force'][0][0][0])
+    else:
+      force_features = tf.fill(tf.shape(frame['world_edges']), frame['force'][0][0][0] / tf.cast(num_unique_world_edges, dtype=tf.float32))
     senders, receivers = tf.unstack(force_features, axis=-1)
     frame['world_edges_over_force'] = tf.expand_dims(tf.concat([senders, receivers], axis=-1), axis=-1)
 
@@ -417,11 +422,17 @@ def evaluator_file_split(params):
   train_files = [k for k in total_files if "6polygon01" in k or "6polygon03" in k]
   test_files = [k for k in total_files if "cuboid02" in k]
 
-  test_files = [k for k in total_files if "flask" in k]
-  train_files = test_files
-
+  test_files = [k for k in total_files if "test" in k]
+  train_files = [k for k in total_files if "test" not in k]
  
+  # test_files = [k for k in total_files if "flask" in k]
+  # train_files = [k for k in total_files if "flask" not in k]
+
+  # test_files = [k for k in total_files if "5e5" in k]
+  # train_files = [k for k in total_files if "5e5" not in k]
+  # test_files = train_files
   # '''
+
 
   return train_files, test_files
 
@@ -512,7 +523,7 @@ def learner(model, params):
 
 
 
-  if latest is None:
+  if latest is None or True: # Accumulate stats anyway
     iterator = iter(single_train_ds)
 
     num_train_dp = 0
@@ -587,6 +598,7 @@ def learner(model, params):
     iterator = iter(train_ds)
     train_losses = []
 
+    # '''
     try:
       t0 = timeit.default_timer()
       while True:
@@ -607,7 +619,7 @@ def learner(model, params):
       tnext = timeit.default_timer()
       epoch_time = tnext - t0
       print("------Time taken for epoch", i, ":", epoch_time, np.mean(train_losses))
-
+    # '''
     ################
     # '''
     if i % FLAGS.num_epochs_per_validation == 0:
@@ -620,6 +632,7 @@ def learner(model, params):
       baseline_pos_mean_errors, baseline_pos_final_errors = [], []
       baseline_stress_mean_errors, baseline_stress_final_errors = [], []
       actual_mean_stresses, pred_mean_stresses = [], []
+      actual_max_stresses, pred_max_stresses = [], []
       actual_mean_defs, pred_mean_defs = [], []
       mean_def_percent_errors, mean_stress_percent_errors = [], []
 
@@ -638,9 +651,11 @@ def learner(model, params):
 
           # actual_mean_stresses.append(test_traj_data['mean_actual_stress'])
           actual_mean_stresses.append(test_traj_data['mean_actual_stress_under_stress_only'])
+          actual_max_stresses.append(test_traj_data['max_actual_stress'])
 
           # pred_mean_stresses.append(test_traj_data['mean_pred_stress'])
           pred_mean_stresses.append(test_traj_data['mean_pred_stress_under_stress_only'])
+          pred_max_stresses.append(test_traj_data['max_pred_stress'])
 
           # actual_mean_defs.append(test_traj_data['mean_actual_deformation_norm'])
           actual_mean_defs.append(test_traj_data['mean_actual_deformation_norm_under_stress_only'])
@@ -678,7 +693,6 @@ def learner(model, params):
       plt.scatter(actual_mean_stresses, pred_mean_stresses)
       plt.show()
       '''
-
       # Save only if validation loss is good
       if np.mean(test_losses) <= lowest_val_errors[-1]:
         lowest_val_errors.append(np.mean(test_losses))
@@ -693,21 +707,37 @@ def learner(model, params):
 
     print("~~~~~TEST VS RAW:", np.mean(test_losses), np.mean(test_pos_mean_errors))
 
+    # Calculate kendall tau for binned points (doesn't work that well)
+    '''
+    n_test = 10
+    stress_sorted_idx = np.argsort(actual_mean_stresses)
+    spaced_idx = np.round(np.linspace(0, len(stress_sorted_idx) - 1, n_test)).astype(int)
+    stress_sorted_idx = stress_sorted_idx[spaced_idx]
+    actual_mean_stresses = np.asarray(actual_mean_stresses)[stress_sorted_idx]
+    pred_mean_stresses = np.asarray(pred_mean_stresses)[stress_sorted_idx]
+
+    def_sorted_idx = np.argsort(actual_mean_defs)
+    spaced_idx = np.round(np.linspace(0, len(def_sorted_idx) - 1, n_test)).astype(int)
+    def_sorted_idx = def_sorted_idx[spaced_idx]
+    actual_mean_defs = np.asarray(actual_mean_defs)[def_sorted_idx]
+    pred_mean_defs = np.asarray(pred_mean_defs)[def_sorted_idx]
+    '''
+
+
     tau_stress, _ = stats.kendalltau(actual_mean_stresses, pred_mean_stresses)
     tau_def, _ = stats.kendalltau(actual_mean_defs, pred_mean_defs)
+    tau_max_stress, _ = stats.kendalltau(actual_max_stresses, pred_max_stresses)
 
-    print("Kendall's taus:", tau_stress, tau_def)
-    print("Mean def percent error", np.mean(mean_def_percent_errors))
-
+    print("Kendall's taus:", tau_def, tau_stress, tau_max_stress)
     # Record losses in text file
     logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
 
     if FLAGS.checkpoint_dir:
       file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
-      log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
+      log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
         np.mean(test_pos_final_errors), np.mean(baseline_pos_mean_errors), np.mean(baseline_pos_final_errors), \
         np.mean(test_stress_mean_errors), np.mean(test_stress_final_errors), np.mean(baseline_stress_mean_errors), np.mean(baseline_stress_final_errors), \
-        tau_stress, tau_def, np.mean(mean_def_percent_errors), np.mean(mean_stress_percent_errors), epoch_time)
+        tau_stress, tau_def, np.mean(mean_def_percent_errors), np.mean(mean_stress_percent_errors), tau_max_stress, epoch_time)
 
       file.write(log_line)
       file.close()
@@ -787,11 +817,12 @@ def evaluator_sample(model, params):
 
 
     if sample:
+      obj_name = "lemon02"
       obj_stl_file = os.path.join(DATASET_FOLDER, obj_name, obj_name + "_processed.stl")
       transformation_matrices = utils.sample_grasps(obj_stl_file, number_of_grasps)
       try:
         # while True:
-        for j in range(1):
+        for j in range(10):
           inputs = iterator.get_next()
 
         for traj_idx in range(number_of_grasps): # shifted is for traj 0
@@ -802,18 +833,19 @@ def evaluator_sample(model, params):
           inputs['tfn'] = candidate_tfn_tensor
 
           # Predict directly the deformation
-          test_inputs = {k: v[5:6] for k, v in inputs.items()}
+          test_inputs = {k: v[20:21] for k, v in inputs.items()}
+
           initial_state = {k: v[0] for k, v in test_inputs.items()}
           initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
 
-          # if tf.reduce_sum(initial_state['gripper_pos']).numpy() < 0.02:
-            # continue
+          if tf.reduce_sum(initial_state['gripper_pos']).numpy() < 0.03:
+            continue
 
           f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
           direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, test_inputs, FLAGS)
 
           if not np.isnan(np.mean(f_verts.numpy())):
-            pred_def_list.append(traj_data['mean_deformation_norm'])
+            pred_def_list.append(traj_data['max_deformation_norm_opt']) # mean_deformation_norm, max_pred_stress
             f_verts_list.append(f_verts)
           # print(traj_data['mean_deformation_norm'])
 
@@ -838,12 +870,12 @@ def evaluator_sample(model, params):
     ax.scatter(X, Y, Z, c=Y)
 
     # '''
-    for l in range(5):
+    for l in range(3):
       f_verts_min = f_verts_list[sorted_args[l]]
       Xf_min, Yf_min, Zf_min = f_verts_min.numpy().T
       ax.scatter(Xf_min, Yf_min, Zf_min, c='green')
 
-    for l in range(5):
+    for l in range(3):
       f_verts_max = f_verts_list[sorted_args[-(l+1)]]
       Xf_max, Yf_max, Zf_max = f_verts_max.numpy().T
       ax.scatter(Xf_max, Yf_max, Zf_max, c='red')
@@ -973,9 +1005,9 @@ def evaluator(model, params):
       
 
     try:
-      # while True:
+      while True:
       # '''
-      for traj_idx in range(10): # shifted is for traj 0
+      # for traj_idx in range(10): # shifted is for traj 0
         inputs = iterator.get_next()
       # '''
         # Calculate gradients
@@ -1297,8 +1329,8 @@ def evaluator(model, params):
     for ind, (metric_name, pred, actual) in enumerate(zip(metric_names, preds, actuals)):
       print("======Metric:", metric_name)
       for m_type in ['mean', 'max']:
-        num_correct, num_total = utils.classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
-        # num_correct, num_total = utils.classification_accuracy_ranking(pred[m_type], actual[m_type], 30)
+        # num_correct, num_total = utils.classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
+        num_correct, num_total = utils.classification_accuracy_ranking(pred[m_type], actual[m_type], 30)
 
         print(m_type, "accuracy:", num_correct / num_total, "of", num_total)
         runnings[ind][m_type][0] += num_correct
@@ -1313,8 +1345,8 @@ def evaluator(model, params):
   for metric_name, all_pred, all_actual in zip(metric_names, all_preds, all_actuals):
     print("======Metric:", metric_name)
     for m_type in ['mean', 'max']:
-      num_correct, num_total = utils.classification_accuracy_threshold(all_pred[m_type], all_actual[m_type], 50)
-      # num_correct, num_total = utils.classification_accuracy_ranking(all_pred[m_type], all_actual[m_type], 50)
+      # num_correct, num_total = utils.classification_accuracy_threshold(all_pred[m_type], all_actual[m_type], 50)
+      num_correct, num_total = utils.classification_accuracy_ranking(all_pred[m_type], all_actual[m_type], 50)
       print(m_type, "Accuracy:", num_correct / num_total, "of", num_total)
 
 
@@ -1388,7 +1420,9 @@ def main(argv):
       output_size=output_size,
       latent_size=FLAGS.latent_size,
       num_layers=FLAGS.num_layers,
-      message_passing_steps=FLAGS.message_passing_steps)
+      use_layernorm=FLAGS.layernorm,
+      message_passing_steps=FLAGS.message_passing_steps
+      )
 
 
   model = params['model'].Model(learned_model, FLAGS)

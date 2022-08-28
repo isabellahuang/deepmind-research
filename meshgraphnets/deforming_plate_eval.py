@@ -309,6 +309,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   deformation_norms_percent_error = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms_percent_error, tf.zeros_like(deformation_norms_percent_error))
   deformation_norms_percent_error = deformation_norms_percent_error[2:, 1180:]
 
+
   # Get stress percent errors
   stress_prediction_abs_error = tf.math.abs(stress_prediction - inputs['stress'])
   actual_stress_no_zeros = tf.where(tf.abs(inputs['stress']) < eps, eps * tf.ones_like(inputs['stress']), inputs['stress'])
@@ -351,6 +352,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   mean_stress_under_stress_only = tf.math.divide(tf.reduce_sum(stress_under_stress_only, axis=-1), sum_nodes_under_stress)
   actual_mean_stress_under_stress_only = tf.math.divide(tf.reduce_sum(actual_stress_under_stress_only, axis=-1), sum_nodes_under_stress)
 
+
   traj_ops = {
       'faces': inputs['cells'],
       'name': inputs['name'],
@@ -358,6 +360,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
       'mesh_pos': inputs['mesh_pos'],
       'gt_pos': inputs['world_pos'],
       'gt_stress': inputs['stress'],
+      'stress_error': stress_error,
       'pred_pos': pos_prediction,
       'pred_stress': stress_prediction,
       'sim_world_pos': inputs['sim_world_pos'] if 'sim_world_pos' in inputs.keys() else inputs['world_pos'],
@@ -370,12 +373,19 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
       'mean_actual_stress_under_stress_only': tf.reduce_mean(actual_mean_stress_under_stress_only),
       'mean_pred_stress_under_stress_only': tf.reduce_mean(mean_stress_under_stress_only),
 
+      'mean_deformation_norm_opt': tf.reduce_mean(deformation_norms[:, 1180:]),
+      'max_deformation_norm_opt': tf.reduce_max(deformation_norms[:, 1180:]),
+
       'mean_deformation_norm': tf.reduce_mean(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))[:, 1180:]),
       'max_deformation_norm': tf.reduce_max(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))[:, 1180:]),
+      'deformation_norms': mean_deformation_under_stress_only,
+      'deformation_norms_all': deformation_norms,
 
       'mean_actual_deformation_norm': tf.reduce_mean(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms_no_zeros, tf.zeros_like(actual_deformation_norms_no_zeros))[:, 1180:]),
       'max_actual_deformation_norm': tf.reduce_max(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms_no_zeros, tf.zeros_like(actual_deformation_norms_no_zeros))[:, 1180:]),
-      
+      'actual_deformation_norms': mean_actual_deformation_under_stress_only,
+      'actual_deformation_norms_all': actual_deformation_norms_no_zeros,
+
       'mean_deformation_norm_under_stress_only': tf.reduce_mean(mean_deformation_under_stress_only),
       'mean_actual_deformation_norm_under_stress_only': tf.reduce_mean(mean_actual_deformation_under_stress_only),
 

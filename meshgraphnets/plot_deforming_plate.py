@@ -102,7 +102,7 @@ def main(unused_argv):
 
   fig = plt.figure(figsize=(8, 8))
   ax = fig.add_subplot(111, projection='3d')
-  skip = 5
+  skip = 2
   num_steps = rollout_data[0]['gt_pos'].shape[0]
   num_frames = len(rollout_data) * num_steps // skip
 
@@ -191,7 +191,7 @@ def main(unused_argv):
     '''
 
     # print("{:3d} {:4f} {:8f} {:8f}".format(step, gt_force[0][0], np.max(stress), np.max(gt_stress)))
-    print("===", step, gt_force[0][0], np.min(gt_stress[1180:]), np.max(stress), np.max(gt_stress))
+    print("===", step, gt_force[0][0], np.min(gt_stress[1180:]), np.mean(stress), np.mean(gt_stress))
 
     faces = rollout_data[traj]['faces'][step]
 
@@ -288,15 +288,13 @@ def main(unused_argv):
 
     ######################
 
-
     ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=stress[:], vmin=vmin, vmax=vmax)
 
-    # ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
     # ax.scatter(gt_sim_pos[:, 0], gt_sim_pos[:, 1], gt_sim_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=gt_vmax)
+    # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c='green', vmin=vmin, vmax=gt_vmax)
+    # print((pos - gt_sim_pos).shape)
 
 
-
-    # ax.scatter(gt_pos[:, 0], gt_pos[:, 1], gt_pos[:, 2], c=gt_stress[:], vmin=vmin, vmax=vmax)
 
 
 

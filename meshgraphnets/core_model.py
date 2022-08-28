@@ -124,6 +124,7 @@ class EncodeProcessDecode(snt.Module):
                latent_size,
                num_layers,
                message_passing_steps,
+               use_layernorm,
                name='EncodeProcessDecode'):
     super().__init__(name=name)
 
@@ -131,12 +132,13 @@ class EncodeProcessDecode(snt.Module):
     self._output_size = output_size
     self._num_layers = num_layers
     self._message_passing_steps = message_passing_steps
+    self._use_layernorm = use_layernorm
 
   
   @snt.once # this might be necessary to fix what used to be controlled by variable scopes
   def _initialize(self, graph):
     '''Initialize all the MLPs'''
-    self._decoder_fn =  self._make_mlp(self._output_size, layer_norm=False)
+    self._decoder_fn =  self._make_mlp(self._output_size, layer_norm=self._use_layernorm) # Layer norm changed
     self._node_latents_fn = self._make_mlp(self._latent_size)
 
     self._edge_latent_fns = []
@@ -149,6 +151,7 @@ class EncodeProcessDecode(snt.Module):
 
   def _make_mlp(self, output_size, layer_norm=False): ## For gradient debugging, set layer_norm=False. It's typically = True
     """Builds an MLP."""
+    layer_norm = self._use_layernorm
     widths = [self._latent_size] * self._num_layers + [output_size]
     network = snt.nets.MLP(widths, activate_final=False)
     # network = MyMLP(widths, activate_final=False)
