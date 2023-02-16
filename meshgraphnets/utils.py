@@ -214,6 +214,29 @@ def classification_accuracy_ranking(predicted, actual, percentile):
   # return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted)
   return len(predicted_bottom_correct) + len(predicted_top_correct), len(predicted_top) + len(predicted_bottom)
 
+def tfn_to_mat(tfn):
+    gym_r = R.from_matrix(np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]]))
+    gym_r_inv = gym_r.inv()
+    euler_trans = np.asarray(tfn)[0]
+    total_mtx = R.from_euler('xyz', euler_trans[:3])
+    trans_rot = gym_r_inv * total_mtx
+
+
+    trans_t = gym_r_inv.apply(euler_trans[3:] - [0, 1, 0])
+    transform = np.eye(4)
+    transform[:3, :3] = R.as_matrix(trans_rot)
+    transform[:3, 3] = trans_t
+    return transform
+
+def mat_to_pose_wxyz(mat):
+    return dcu.mat_to_pose_wxyz(mat)
+
+def pose_wxyz_to_mat(p):
+    return dcu.pose_wxyz_to_mat(p)
+
+
+def poses_wxyz_to_mats(results):
+    return dcu.poses_wxyz_to_mats(results)
 
 def sample_grasps(obj_stl_file, number_of_grasps):
 
@@ -230,7 +253,7 @@ def sample_grasps(obj_stl_file, number_of_grasps):
     results = np.asarray(results)
     print("+++++", np.mean(results))
     transformation_matrices = dcu.poses_wxyz_to_mats(results)
-    return transformation_matrices
+    return results, transformation_matrices
 
 def get_mtx_from_h5(h5file):
     import h5py

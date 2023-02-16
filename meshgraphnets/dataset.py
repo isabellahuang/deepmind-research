@@ -147,8 +147,9 @@ def add_targets(ds, FLAGS, fields, add_history):
 
 
         # Tile all world_pos to be the same throughout trajectory
-        if utils.predict_some_stress_only(FLAGS) or FLAGS.predict_pos_change_from_initial_only:
-          val = initial_quantity_repeated
+        if not FLAGS.incremental:
+          if utils.predict_some_stress_only(FLAGS) or FLAGS.predict_pos_change_from_initial_only:
+            val = initial_quantity_repeated
 
 
 

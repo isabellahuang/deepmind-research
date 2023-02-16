@@ -19,6 +19,7 @@ import os
 
 import sonnet as snt
 import tensorflow as tf
+import tensorflow_model_remediation as tfmr
 
 # from tfdeterminism import patch
 # patch()
@@ -330,6 +331,8 @@ class Model(snt.Module):
     if not use_precomputed: 
       world_edge_force_feature = tf.fill(tf.shape(relative_world_norm), force_label)
       world_edge_force_change_feature = tf.fill(tf.shape(relative_world_norm), force_change_label)
+      if self.FLAGS.incremental:
+        world_edge_force_feature = world_edge_force_change_feature
 
     else:
       world_edge_force_feature = inputs['world_edges_over_force']
@@ -492,6 +495,10 @@ class Model(snt.Module):
     if utils.predict_stress_and_def(self.FLAGS):
       combined_target = tf.concat([target_position_change_from_initial, target_stress_change], 1)
 
+    if self.FLAGS.incremental:
+      target_stress_change = inputs['target|stress'] - inputs['stress']
+      target_position_change = inputs['target|world_pos'] - inputs['world_pos']
+      combined_target = tf.concat([target_position_change, target_stress_change], 1)
 
     return combined_target
 
@@ -526,7 +533,6 @@ class Model(snt.Module):
 
       else:
         object_output, stress_output = tf.split(self._output_normalizer.inverse(network_output), [3,1], 1)
-
 
 
     # build loss
@@ -593,6 +599,9 @@ class Model(snt.Module):
 
       object_error = tf.reduce_sum((object_target_normalized - object_output)**2, axis=1) 
       object_loss = tf.reduce_mean(object_error[object_mask])
+
+      
+      
       loss =  object_loss + stress_loss
 
 
@@ -613,6 +622,8 @@ class Model(snt.Module):
     """Integrate model outputs."""
     actuator_mask = tf.expand_dims(tf.not_equal(inputs['node_type'][:, 0], common.NodeType.OBSTACLE), -1) # Where nodes are NOT actuators
     fixed_points = tf.expand_dims(tf.equal(inputs['node_type'][:, 0], common.NodeType.HANDLE), -1) # Where nodes ARE fixed
+
+
 
 
     if not utils.using_dm_dataset(self.FLAGS) and not use_precomputed:
@@ -676,7 +687,7 @@ class Model(snt.Module):
     ## These are now all in units of raw stress
     if self.FLAGS.predict_log_stress_t_only:
       next_stress_pred = tf.math.exp(stress_change) - 1
-    elif self.FLAGS.predict_stress_t_only:
+    elif self.FLAGS.predict_stress_t_only: ####
       next_stress_pred = stress_change
     elif self.FLAGS.predict_log_stress_t1 or self.FLAGS.predict_log_stress_t1_only:
       next_stress_pred = tf.math.exp(stress_change) - 1
@@ -689,6 +700,9 @@ class Model(snt.Module):
       next_stress_pred = inputs['target|stress']
     else:
       next_stress_pred = stress_change
+
+    if self.FLAGS.incremental:
+      next_stress_pred = inputs['stress'] + stress_change
 
     # Removed just for gradient simplification 
     next_stress_pred = tf.nn.relu(next_stress_pred)

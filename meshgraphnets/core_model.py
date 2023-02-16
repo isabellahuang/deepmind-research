@@ -157,7 +157,7 @@ class EncodeProcessDecode(snt.Module):
     # network = MyMLP(widths, activate_final=False)
 
     if layer_norm:
-      network = snt.Sequential([network, snt.LayerNorm()])
+      network = snt.Sequential([network, snt.LayerNorm(axis=-1, create_offset=True, create_scale=True)])
     return network
 
   def _encoder(self, graph):

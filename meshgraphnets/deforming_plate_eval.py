@@ -44,11 +44,13 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
 
 
     curr_stress_feed = curr_stress
-    if FLAGS.predict_log_stress_t_only or FLAGS.predict_stress_t_only: # it shouldnt have access to inputs['stress'][step] though, but needed to calculate loss
+    if (FLAGS.predict_log_stress_t_only or FLAGS.predict_stress_t_only) and not FLAGS.incremental: # it shouldnt have access to inputs['stress'][step] though, but needed to calculate loss
       curr_stress_feed = inputs['stress'][step]
 
-    if FLAGS.predict_pos_change_from_initial_only:
+    if FLAGS.predict_pos_change_from_initial_only and not FLAGS.incremental:
       cur_pos = inputs['world_pos'][step]
+
+
 
     model_input_dict = {**initial_state,
                         'world_pos': cur_pos, 
@@ -57,13 +59,9 @@ def _rollout(model, initial_state, inputs, num_steps, FLAGS, normalize, accumula
                         'target|stress': inputs['target|stress'][step],
                         'sim_world_pos': inputs['sim_world_pos'][step]}
 
-    '''
-    if not utils.using_dm_dataset(FLAGS):
-      model_input_dict['gripper_pos'] = inputs['gripper_pos'][step]
-      model_input_dict['target|gripper_pos'] = inputs['target|gripper_pos'][step]
-      model_input_dict['tfn'] = inputs['tfn'][step]
-    '''
-
+    if FLAGS.incremental:
+      model_input_curr = {k: v[0] for k, v in inputs.items()}
+      model_input_dict['gripper_pos'] = gripper_pos_at_first_contact(model_input_curr, model.f_pc_original)
 
     if not FLAGS.compute_world_edges:
     # if not utils.using_dm_dataset(FLAGS):
@@ -125,37 +123,6 @@ def get_real_median(v):
         return 0.5 * (val[-1] + val[-2])
 
 
-def refine_inputs(model, inputs, FLAGS, grad_data, custom_constant=0):
-
-  grad = grad_data[0]
-  # random_grad_data = tf.random.uniform([6], minval=-1, maxval=1)
-
-  dot_tf = tf.expand_dims(tf.constant([0,0,0, 1, 1, 1], dtype=tf.float32), axis=-1)
-  grad = tf.math.multiply(grad, dot_tf)
-
-  # grad = tf.random.uniform([6], minval=-1, maxval=1) #this is not the way to do it, otherwise every constant is random
-
-  '''
-  euler, trans = tf.split(grad, 2, axis=0)
-  trans_norm = tf.norm(trans)
-  constant = 0.01 / trans_norm
-  '''
-  constant = custom_constant
-
-
-  refined_tfn = inputs['tfn'][20] + custom_constant * grad
-  # refined_tfn = inputs['force'][20] + custom_constant * grad
-  # refined_tfn = inputs['gripper_pos'][20] + custom_constant * grad
-
-  _, traj_ops_refined, _ = evaluate(model, inputs, FLAGS, tfn=refined_tfn)
-  traj_ops_refined['refined_tfn'] = refined_tfn
-  traj_ops_refined['grad_data'] = grad_data
-  traj_ops_refined['grad'] = grad_data[0]
-  traj_ops_refined['constant'] = constant
-  traj_ops_refined['og_gripper_pos'] = inputs['gripper_pos'][20]
-
-  return traj_ops_refined
-
 
 def gripper_pos_at_first_contact(inputs, f_pc_original):
   # import numpy as np
@@ -216,6 +183,7 @@ def evaluate_one_step(model, inputs, FLAGS, num_steps=None, normalize=True, accu
   # This should be replaced later, move this to the dataset processing   
   initial_state = {k: v[0] for k, v in inputs.items()}
 
+
   # initial_state['gripper_pos'] = gripper_pos_at_first_contact(initial_state, model.f_pc_original)
 
   use_precomputed = True
@@ -232,7 +200,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   ####
 
   # Use partial trajectory
-  inputs = {k: v[:30] for k, v in inputs.items()}
+  inputs = {k: v for k, v in inputs.items()}
 
   initial_state = {k: v[0] for k, v in inputs.items()}
 
@@ -248,11 +216,8 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
 
 
-  # stress_prediction is in log
+  # if stress_prediction is in log
   log_gt_stress = tf.math.log(inputs['stress'] + 1)
-
-  # pos_error = tf.reduce_mean(tf.reduce_sum(((pos_prediction - inputs['sim_world_pos'][:num_steps]) ** 2), axis=-1)[:, 1180:], axis=-1) 
-  # baseline_pos_error = tf.reduce_mean(tf.reduce_sum(((inputs['sim_world_pos'][:num_steps] - inputs['sim_world_pos'][0]) ** 2), axis=-1)[:, 1180:], axis=-1)
 
   # MAE instead
   pos_difference_norm = tf.norm(pos_prediction - inputs['sim_world_pos'][:num_steps], axis=-1) #(48, num_nodes)
@@ -264,10 +229,6 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
   pos_error = tf.reduce_mean(pos_difference_norm, axis=-1) # (48,)
   baseline_pos_error = tf.reduce_mean(baseline_difference_norm, axis=-1) # (48,)
-
-  # Raw stress errors, in real units
-  # stress_error = tf.reduce_mean(tf.reduce_sum(((stress_prediction - inputs['stress'][:num_steps]) ** 2), axis=-1)[:, 1180:], axis=-1) # don't include the grippers
-  # baseline_stress_error = tf.reduce_mean(tf.reduce_sum(((inputs['stress'][:num_steps] - inputs['stress'][0]) ** 2), axis=-1)[:, 1180:], axis=-1) # don't inculde the grippers
 
   # MAE instead
   stress_error = tf.reduce_mean(tf.reduce_sum((tf.math.abs(stress_prediction - inputs['stress'][:num_steps])), axis=-1)[:, 1180:], axis=-1) # don't include the grippers
@@ -294,8 +255,13 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
 
   deformations = pos_prediction - inputs['world_pos']
   actual_deformations = inputs['sim_world_pos'] - inputs['world_pos']
+  if FLAGS.incremental:
+    deformations = pos_prediction - inputs['world_pos'][0]
+    actual_deformations = inputs['sim_world_pos'] - inputs['world_pos'][0]
+    
   deformation_norms = tf.norm(deformations, axis=-1)
   actual_deformation_norms = tf.norm(actual_deformations, axis=-1)
+
 
   # Get def percent errors
 
@@ -318,18 +284,7 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   stress_percent_error = stress_percent_error[2:, 1180:]
 
   nodes_under_stress = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff)
-  '''
-  print(nodes_under_stress.shape)
-  print(tf.gather(tf.squeeze(inputs['stress'], -1), nodes_under_stress).shape)
-  print(tf.gather(deformation_norms, nodes_under_stress).shape)
-  print(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms_no_zeros, tf.zeros_like(actual_deformation_norms_no_zeros)).shape)
-  print(stress_prediction.shape)
-  '''
-  # (19402, 2)
-  # (19402, 2, 2332)
-  # (19402, 2, 2332)
-  # (48, 2332)
-  # (48, 2332, 1)
+
 
   ### Deformation norms under stress only
   squeezed_stress = tf.squeeze(inputs['stress'], -1)
@@ -338,7 +293,6 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
   nodes_under_stress_only = tf.where(squeezed_stress > stress_cutoff, tf.ones_like(deformation_norms), tf.zeros_like(deformation_norms))
   deformation_norms_under_stress_only = tf.where(squeezed_stress > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))
   actual_deformation_norms_under_stress_only = tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, actual_deformation_norms, tf.zeros_like(actual_deformation_norms))
-
   sum_nodes_under_stress = tf.reduce_sum(nodes_under_stress_only, axis=-1)
   sum_nodes_under_stress = tf.where(tf.equal(sum_nodes_under_stress, 0), tf.ones_like(sum_nodes_under_stress), sum_nodes_under_stress)
 
@@ -373,7 +327,11 @@ def evaluate(model, inputs, FLAGS, num_steps=None, normalize=True, accumulate=Fa
       'mean_actual_stress_under_stress_only': tf.reduce_mean(actual_mean_stress_under_stress_only),
       'mean_pred_stress_under_stress_only': tf.reduce_mean(mean_stress_under_stress_only),
 
-      'mean_deformation_norm_opt': tf.reduce_mean(deformation_norms[:, 1180:]),
+
+      'mean_deformation_norm_opt': tf.reduce_mean(deformation_norms[:, :]),
+      'median_deformation_norm_opt': tfp.stats.percentile(deformation_norms[:, :], 50),
+      'median_actual_deformation_norm': tfp.stats.percentile(actual_deformation_norms[:, :], 50),
+
       'max_deformation_norm_opt': tf.reduce_max(deformation_norms[:, 1180:]),
 
       'mean_deformation_norm': tf.reduce_mean(tf.where(tf.squeeze(inputs['stress'], -1) > stress_cutoff, deformation_norms, tf.zeros_like(deformation_norms))[:, 1180:]),

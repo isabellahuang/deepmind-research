@@ -26,6 +26,7 @@ os.environ['TF_CPP_VMODULE'] = 'asm_compiler=2'
 import pickle
 import sys
 import re
+import h5py
 
 import sonnet as snt
 from absl import app
@@ -45,6 +46,9 @@ tf.config.experimental.set_memory_growth(devices[0], True)
 
 # from tfdeterminism import patch
 SEED = 55
+
+
+# Hardcoded paths to different datasets
 ABC_DATASET_FOLDER = os.path.join("..", "..", "abc_dataset", "abc_dataset", "0-9999")
 SIMPLE_GEOMETRIC_DATASET_FOLDER = os.path.join("..", "..", "deformable_object_grasping", "simple_geometric_dataset")
 CONTAINER_DATASET_FOLDER = os.path.join("..", "..", "deformable_object_grasping", "container_dataset")
@@ -114,6 +118,7 @@ flags.DEFINE_bool('eager', False, 'Use eager execution')
 
 
 # Exactly one of these must be set to True
+flags.DEFINE_bool("incremental", False, "Predict step changes")
 flags.DEFINE_bool('predict_log_stress_t1', False, 'Predict the log stress at t1')
 
 flags.DEFINE_bool('predict_log_stress_change_t1', False, 'Predict the log of stress change from t to t1')
@@ -155,11 +160,8 @@ LEN_TRAJ = 0
 
 
 
-
 def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=False, takeall=False):
-  # ds = dataset.load_dataset(FLAGS.dataset_dir, 'train', FLAGS.num_objects)
   ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
-
 
   test = not n_horizon
   if test:
@@ -215,23 +217,18 @@ def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=Fal
         shifted_lists.append(shifted_list)
 
       out[key] = shifted_lists
-
-
     return tf.data.Dataset.from_tensor_slices(out)
 
 
   def world_edges_processing_map(frame):
-    # frame['world_edges'] = frame['world_edges'][:, :200]
-
 
     # Remove non-unique edges
-    # '''
     val = frame['world_edges']
     sum_across_row = tf.reduce_sum(val, axis=-1)
     unique_edges = tf.where(tf.not_equal(sum_across_row, 0))
     close_pair_idx = tf.gather(val, unique_edges[:,1], axis=1)
-    frame['world_edges'] = close_pair_idx  # (1, num_unique_world_edges, 2)
-    # '''
+    frame['world_edges'] = close_pair_idx  
+
 
     # Assign distributed force to each edge
     num_unique_world_edges = tf.shape(frame['world_edges'])[1]
@@ -239,6 +236,10 @@ def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=Fal
       force_features = tf.fill(tf.shape(frame['world_edges']), frame['force'][0][0][0])
     else:
       force_features = tf.fill(tf.shape(frame['world_edges']), frame['force'][0][0][0] / tf.cast(num_unique_world_edges, dtype=tf.float32))
+
+    if FLAGS.incremental:
+      force_features = tf.fill(tf.shape(frame['world_edges']), (frame['target|force'][0][0][0] - frame['force'][0][0][0]) / tf.cast(num_unique_world_edges, dtype=tf.float32))
+
     senders, receivers = tf.unstack(force_features, axis=-1)
     frame['world_edges_over_force'] = tf.expand_dims(tf.concat([senders, receivers], axis=-1), axis=-1)
 
@@ -257,9 +258,6 @@ def get_flattened_dataset(ds, params, n_horizon=None, do_cutoff=False, batch=Fal
 
 
   def add_noise(frame):
-    # for key, val in frame.items():
-    #   print(key)
-
     noise = tf.random.normal(tf.shape(frame[noise_field]),
                              stddev=FLAGS.noise_scale, dtype=tf.float32)
     # don't apply noise to boundary nodes
@@ -355,85 +353,10 @@ def evaluator_file_split(params):
   total_folder = FLAGS.dataset_dir
   total_files = sorted([os.path.join(total_folder, k) for k in os.listdir(total_folder)])
 
-  train_files = [k for k in total_files if '00000015' in k] # trapezoidal prism
-  train_files = [k for k in total_files if '00000007' in k] # circular disk
-  train_files = [k for k in total_files if '00000016' in k] # rectangular prism
-  train_files = [k for k in total_files if 'rectangle' in k] # rectangle dense grasps
 
-  # filtered_total_files = filter_for_good_objects(total_files, params)
-
-  # filtered_total_files = [k for k in total_files if "fillet" not in k and "6polygon" in k]# and int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) <= 3]
-
-  '''
-  # abc simple objects
-  train_files = [k for k in total_files if '00007256' in k] #sorted_total_files[:1]
-  train_files = [k for k in total_files if '00000007' in k] 
-
-  if utils.using_dm_dataset(FLAGS):
-    train_files = [k for k in total_files if 'valid' in k] # MGN dataset
-
-  test_files = [k for k in total_files if '00007256' in k] #sorted_total_files[:1]
-  test_files = [k for k in total_files if '00000007' in k] #sorted_total_files[:1]
-  '''
-
-
-  # Take mid 6 objects for testing
-  '''
-  test_len = 6
-  mp = len(filtered_total_files) / 2
-  test_files = filtered_total_files[int(mp-test_len/2):int(mp+test_len/2)]
-  train_files = filtered_total_files[:int(mp-test_len/2)] + filtered_total_files[int(mp+test_len/2):]
-  assert(len(set(test_files).intersection(set(train_files))) == 0)
-  '''
-
-  # train_files = [k for k in filtered_total_files if int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) not in [3, 5]]
-  # test_files = [k for k in filtered_total_files if int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) in [3, 5]]
-
-  # train_files = test_files 
-
-  # filtered_total_files = [k for k in total_files if "annulus01" in k]# and int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) <= 3]
-
-
-  # Cup in-class
-  # total_files = [k for k in total_files if "fillet" not in k]
-  # train_files = [k for k in total_files if "cup" in k and int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) in [1, 3, 4]]
-  # test_files = [k for k in total_files if "cup" in k and int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) in [2]]
-
-  # Out of class
-  # '''
-  # filtered_total_files = [k for k in total_files if "fillet" not in k]
-  # train_files = [k for k in filtered_total_files if k.split("/")[-1].split(".")[0].split("0")[0] in \
-  # ["8polygon", "cuboid", "cylinder", "sphere"] and int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) in [1, 2, 3]]
-  # test_files = [k for k in filtered_total_files if k.split("/")[-1].split(".")[0].split("0")[0] in \
-  # ["6polygon"] and int(re.search(r'\d+$', k.split("/")[-1].split(".")[0]).group()) in [1, 2, 3]][0:1] # Just for eval select first
-
-
-  # Containers
-  train_files = [k for k in total_files if "mustard" not in k]
-  test_files = [k for k in total_files if "mustard" in k]
-
-
-  # Mods
-  train_files = [k for k in total_files if "5e6" not in k]
-  test_files = [k for k in total_files if "5e6" in k]
-
-
-  # test_files = train_files
-  train_files = [k for k in total_files if "6polygon01" in k or "6polygon03" in k]
-  test_files = [k for k in total_files if "cuboid02" in k]
-
-  test_files = [k for k in total_files if "test" in k]
+  # Set conditions for splitting test and train sets, eg: 
   train_files = [k for k in total_files if "test" not in k]
- 
-  # test_files = [k for k in total_files if "flask" in k]
-  # train_files = [k for k in total_files if "flask" not in k]
-
-  # test_files = [k for k in total_files if "5e5" in k]
-  # train_files = [k for k in total_files if "5e5" not in k]
-  # test_files = train_files
-  # '''
-
-
+  test_files = [k for k in total_files if "test" in k]
   return train_files, test_files
 
 def remove_zero_world_edges(inputs):
@@ -486,8 +409,8 @@ def learner(model, params):
   train_ds_og = dataset.load_dataset(FLAGS.dataset_dir, train_files)
   test_ds = dataset.load_dataset(FLAGS.dataset_dir, test_files)
 
-  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, do_cutoff=True, batch=True) #percentile_cutoff
-  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, do_cutoff=True, batch=False) #percentile_cutoff
+  train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, do_cutoff=True, batch=True) 
+  single_train_ds = get_flattened_dataset(train_ds_og, params, n_horizon, do_cutoff=True, batch=False) 
   test_ds = get_flattened_dataset(test_ds, params, do_cutoff=True,  batch=False)
 
 
@@ -518,12 +441,10 @@ def learner(model, params):
 
 
   ########### Take in all training data for normalization stats
-  # '''
+
   t0_accumulate = timeit.default_timer()
 
-
-
-  if latest is None or True: # Accumulate stats anyway
+  if latest is None: # Accumulate stats anyway
     iterator = iter(single_train_ds)
 
     num_train_dp = 0
@@ -533,7 +454,6 @@ def learner(model, params):
       while True:
 
         inputs = iterator.get_next()
-        # print(inputs['world_edges'].shape)
         model.accumulate_stats(inputs)
 
 
@@ -547,10 +467,11 @@ def learner(model, params):
       tnext = timeit.default_timer()
       print("Time taken for accumulation", timeit.default_timer() - t0_accumulate)
       pass
-  # '''
+
   # print(model.accumulate_stats.pretty_printed_concrete_signatures()) 
   # quit()
-  ########### Get distribution of all stresses seen during training
+
+  ########### Get distribution of all stresses seen during training (for debugging)
   '''
   iterator = iter(test_ds)
 
@@ -585,9 +506,6 @@ def learner(model, params):
   '''
   #####################
 
-  # @tf.function
-  # def train():
-
   step = 0
   epoch_time = 0
 
@@ -601,7 +519,9 @@ def learner(model, params):
     # '''
     try:
       t0 = timeit.default_timer()
+      start_time = timeit.default_timer()
       while True:
+        
         # with tf.profiler.experimental.Trace('my_train_step', step_num=step, _r=1):
         inputs = iterator.get_next()
 
@@ -610,9 +530,11 @@ def learner(model, params):
 
         train_loss = train_step(inputs)
         train_losses.append(train_loss)
-
         if step % 500 == 0:
           logging.info('Epoch %d, Step %d: Avg Loss %g', i, step, np.mean(train_losses))
+          print(timeit.default_timer() - start_time)
+          start_time = timeit.default_timer()
+
 
     except tf.errors.OutOfRangeError:
 
@@ -644,7 +566,6 @@ def learner(model, params):
 
           # '''
           validation_counter += 1
-          # test_loss, test_traj_data, test_scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS, normalize=True) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
 
           # Make tf function
           test_loss, test_traj_data, test_scalar_data = validation_step(inputs) # Full trajectory. NORMALIZE SHOULD BE TRUE. 
@@ -657,11 +578,9 @@ def learner(model, params):
           pred_mean_stresses.append(test_traj_data['mean_pred_stress_under_stress_only'])
           pred_max_stresses.append(test_traj_data['max_pred_stress'])
 
-          # actual_mean_defs.append(test_traj_data['mean_actual_deformation_norm'])
-          actual_mean_defs.append(test_traj_data['mean_actual_deformation_norm_under_stress_only'])
-
-          # pred_mean_defs.append(test_traj_data['mean_deformation_norm'])
-          pred_mean_defs.append(test_traj_data['mean_deformation_norm_under_stress_only'])
+          # As a test
+          pred_mean_defs.append(test_traj_data['median_deformation_norm_opt'])
+          actual_mean_defs.append(test_traj_data['median_actual_deformation_norm'])
 
           test_losses.append(test_loss)
           test_pos_mean_errors.append(test_scalar_data["pos_mean_error"])
@@ -707,31 +626,19 @@ def learner(model, params):
 
     print("~~~~~TEST VS RAW:", np.mean(test_losses), np.mean(test_pos_mean_errors))
 
-    # Calculate kendall tau for binned points (doesn't work that well)
-    '''
-    n_test = 10
-    stress_sorted_idx = np.argsort(actual_mean_stresses)
-    spaced_idx = np.round(np.linspace(0, len(stress_sorted_idx) - 1, n_test)).astype(int)
-    stress_sorted_idx = stress_sorted_idx[spaced_idx]
-    actual_mean_stresses = np.asarray(actual_mean_stresses)[stress_sorted_idx]
-    pred_mean_stresses = np.asarray(pred_mean_stresses)[stress_sorted_idx]
-
-    def_sorted_idx = np.argsort(actual_mean_defs)
-    spaced_idx = np.round(np.linspace(0, len(def_sorted_idx) - 1, n_test)).astype(int)
-    def_sorted_idx = def_sorted_idx[spaced_idx]
-    actual_mean_defs = np.asarray(actual_mean_defs)[def_sorted_idx]
-    pred_mean_defs = np.asarray(pred_mean_defs)[def_sorted_idx]
-    '''
 
 
     tau_stress, _ = stats.kendalltau(actual_mean_stresses, pred_mean_stresses)
     tau_def, _ = stats.kendalltau(actual_mean_defs, pred_mean_defs)
     tau_max_stress, _ = stats.kendalltau(actual_max_stresses, pred_max_stresses)
-
+    # print(actual_mean_defs)
+    
+    print("MAE def stress", np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))# print(pred_mean_defs)
     print("Kendall's taus:", tau_def, tau_stress, tau_max_stress)
     # Record losses in text file
     logging.info('Epoch %d, Step %d: Train Loss %g, Test Errors %g %g', i, step, np.mean(train_losses), np.mean(test_pos_mean_errors), np.mean(test_stress_mean_errors))
 
+    
     if FLAGS.checkpoint_dir:
       file = open(os.path.join(FLAGS.checkpoint_dir, "losses.txt"), "a")
       log_line = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n" % (step, np.mean(train_losses), np.mean(test_losses), np.mean(test_pos_mean_errors), \
@@ -746,159 +653,6 @@ def learner(model, params):
   # tf.profiler.experimental.stop()
 
   # train()
-
-def evaluator_sample(model, params):
-  sys.path.append('/home/isabella/deformable_object_grasping/graspsampling-py-internship1')
-  import graspsampling
-  from graspsampling import sampling, utilities, hands, io
-  sys.path.append('/home/isabella/deformable_object_grasping/isabella')
-  import data_creator_utils as dcu
-  from scipy.spatial.transform import Rotation as R
-  import h5py
-
-
-
-  number_of_grasps = 80
-
-  # Restore checkpoint
-  # '''
-  checkpoint = tf.train.Checkpoint(module=model)
-  latest = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
-
-  if latest is not None:
-    print("Restoring previous checkpoint")
-    checkpoint.restore(latest)
-  # '''
-
-  train_files, test_files = evaluator_file_split(params)
-  # test_files = train_files
-
-  for ot, obj_file in enumerate(test_files):
-    print("===", obj_file, ot, "of", len(test_files))
-    obj_name = obj_file.split("/")[-1].split(".")[0]
-    ds = dataset.load_dataset(FLAGS.dataset_dir, [obj_file])
-    ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
-    iterator = iter(ds)
-
-    sample = True
-
-
-
-    # obj_grasps_file = os.path.join("..", DATASET_FOLDER, obj_name, obj_name + "_grasps.h5")
-    # transformation_matrices = utils.get_mtx_from_h5(obj_grasps_file)
-
-
-    pred_def_list, f_verts_list = [], []
-
-    if not sample:
-      try:
-        for j in range(number_of_grasps):
-          inputs = iterator.get_next()
-          test_inputs = {k: v[10:11] for k, v in inputs.items()}
-          initial_state = {k: v[0] for k, v in test_inputs.items()}
-          actual_world_pos = test_inputs['sim_world_pos']
-          deformation_norms = tf.norm(test_inputs['sim_world_pos'][0] - test_inputs['world_pos'][0], axis=-1)
-          mean_deformation_norm = tf.reduce_mean(deformation_norms[1180:])
-          max_deformation_norm = tf.reduce_mean(deformation_norms[1180:])
-          percentile_deformation_norm = tfp.stats.percentile(deformation_norms[1180:], 90)
-
-          initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
-          f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
-
-          if tf.reduce_sum(initial_state['gripper_pos']).numpy() < 0.02:
-            continue
-
-          if not np.isnan(np.mean(f_verts.numpy())):
-            pred_def_list.append(mean_deformation_norm)
-            f_verts_list.append(f_verts)
-
-      except tf.errors.OutOfRangeError:
-        pass
-
-
-    if sample:
-      obj_name = "lemon02"
-      obj_stl_file = os.path.join(DATASET_FOLDER, obj_name, obj_name + "_processed.stl")
-      transformation_matrices = utils.sample_grasps(obj_stl_file, number_of_grasps)
-      try:
-        # while True:
-        for j in range(10):
-          inputs = iterator.get_next()
-
-        for traj_idx in range(number_of_grasps): # shifted is for traj 0
-
-          transform = np.asarray(transformation_matrices[traj_idx])
-          candidate_tfn_tensor = utils.tmtx_to_tensor(transform)
-
-          inputs['tfn'] = candidate_tfn_tensor
-
-          # Predict directly the deformation
-          test_inputs = {k: v[20:21] for k, v in inputs.items()}
-
-          initial_state = {k: v[0] for k, v in test_inputs.items()}
-          initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
-
-          if tf.reduce_sum(initial_state['gripper_pos']).numpy() < 0.03:
-            continue
-
-          f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
-          direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, test_inputs, FLAGS)
-
-          if not np.isnan(np.mean(f_verts.numpy())):
-            pred_def_list.append(traj_data['max_deformation_norm_opt']) # mean_deformation_norm, max_pred_stress
-            f_verts_list.append(f_verts)
-          # print(traj_data['mean_deformation_norm'])
-
-      except tf.errors.OutOfRangeError:
-        pass
-
-    import matplotlib
-    matplotlib.use('TkAgg')
-    from matplotlib import animation
-    import matplotlib.pyplot as plt 
-
-    sorted_args = np.argsort(pred_def_list)
-    print(sorted_args)
-
-    world_pos = inputs['world_pos'][0].numpy()
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    X, Y, Z = world_pos[1180:].T
-    cut = np.argwhere(Y>1.0)
-
-    # ax.scatter(X[cut], Y[cut], Z[cut], c=Y[cut])
-    ax.scatter(X, Y, Z, c=Y)
-
-    # '''
-    for l in range(3):
-      f_verts_min = f_verts_list[sorted_args[l]]
-      Xf_min, Yf_min, Zf_min = f_verts_min.numpy().T
-      ax.scatter(Xf_min, Yf_min, Zf_min, c='green')
-
-    for l in range(3):
-      f_verts_max = f_verts_list[sorted_args[-(l+1)]]
-      Xf_max, Yf_max, Zf_max = f_verts_max.numpy().T
-      ax.scatter(Xf_max, Yf_max, Zf_max, c='red')
-    # '''
-
-
-    x_min, x_max = np.min(X), np.max(X)
-    y_min, y_max = np.min(Y), np.max(Y)
-    z_min, z_max = np.min(Z), np.max(Z)
-    max_range = np.array([x_max - x_min, y_max - y_min, z_max - z_min]).max() / 2.0
-    mid_x = (x_max + x_min) * 0.5
-    mid_y = (y_max + y_min) * 0.5
-    mid_z = (z_max + z_min) * 0.5
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
-
-    plt.show()
-
-
 
 
 
@@ -941,54 +695,11 @@ def evaluator(model, params):
   for ot, obj_file in enumerate(test_files):
     print("===", obj_file, ot, "of", len(test_files))
     obj_name = obj_file.split("/")[-1].split(".")[0]
-
+    obj_name = "strawberry02"
     ds = dataset.load_dataset(FLAGS.dataset_dir, [obj_file])
     ds = dataset.add_targets(ds, FLAGS, params['field'] if type(params['field']) is list else [params['field']], add_history=params['history'])
     iterator = iter(ds)
 
-    #######################################################
-    '''
-    # Sample grasps from the stl file
-    obj_stl_file = os.path.join(DATASET_FOLDER, obj_name, obj_name + "_processed.stl")
-    number_of_grasps = 10
-    transformation_matrices = utils.sample_grasps(obj_stl_file, number_of_grasps)
-
-
-    pred_def_list, candidate_tfn_tensor_list = [], []
-
-    try:
-      # while True:
-      for j in range(10):
-        inputs = iterator.get_next()
-
-      for traj_idx in range(number_of_grasps): # shifted is for traj 0
-
-        transform = np.asarray(transformation_matrices[traj_idx])
-        candidate_tfn_tensor = utils.tmtx_to_tensor(transform)
-
-        inputs['tfn'] = candidate_tfn_tensor
-
-        # Predict directly the deformation
-        test_inputs = {k: v[40:41] for k, v in inputs.items()}
-
-        initial_state = {k: v[0] for k, v in test_inputs.items()}
-        initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
-
-        if tf.reduce_sum(initial_state['gripper_pos']).numpy() > 0.04:
-          continue
-        f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
-
-
-        direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, test_inputs, FLAGS)
-        pred_def_list.append(traj_data['mean_deformation_norm'])
-        candidate_tfn_tensor_list.append(candidate_tfn_tensor)
-
-    except tf.errors.OutOfRangeError:
-      pass
-
-    sorted_args = np.argsort(pred_def_list)
-    '''
-    ##############################################################
 
     traj_idx = 0
 
@@ -1005,265 +716,16 @@ def evaluator(model, params):
       
 
     try:
+      
       while True:
-      # '''
-      # for traj_idx in range(10): # shifted is for traj 0
+
         inputs = iterator.get_next()
-      # '''
+
         # Calculate gradients
-        calculate_gradients_line_search = False
-        quantity_to_optimize = "mean_deformation_norm" #"mean_pred_stress"
+        quantity_to_optimize = "max_pred_stress" #"mean_pred_stress"max_deformation_norm_opt
 
-        if calculate_gradients_line_search:
-          
-          # Use sampled grasp
-          inputs['tfn'] = candidate_tfn_tensor_list[sorted_args[2]]
 
-          inputs = {k: v[40:41] for k, v in inputs.items()}
-          
-          # If you want to use normal grasp
-          inputs['tfn'] = tf.Variable(inputs['tfn']) # This is the natural one
-
-          maximize_stress = False
-          num_iterations = 8
-          def refine_step(inputs, k):
-            initial_tfn = inputs['tfn'].numpy() # This doesn't work. Still connected to inputs
-            temp = np.linspace(1000, 5, num_iterations)[k]
-
-            initial_inputs = inputs
-            initial_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(initial_tfn)) # Copy initial tfn by value and not reference
-
-            _, traj_data_init, _ = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
-            initial_stress = traj_data_init[quantity_to_optimize]
-
-            # Add a disturbance term
-            # '''
-            translational_disturbance  = np.random.uniform(-1, 1, (1, 1, 3))
-            # translational_disturbance = (0.005 / (k+1)) * translational_disturbance / np.linalg.norm(translational_disturbance)
-            translational_disturbance = (0.03 / (k+1)) * translational_disturbance / np.linalg.norm(translational_disturbance) # for cup
-            # If disturbances too large this leads to nan gradients
-
-
-            # Disturb only y direction
-            translational_disturbance= np.array([0.0, np.random.uniform(low=-0.03, high=0.03), 0.0])
-
-            disturbed_tfn = inputs['tfn'].numpy()
-            disturbed_tfn[:, :, 3:] = disturbed_tfn[:, :, 3:] + translational_disturbance
-            inputs['tfn'] = tf.Variable(tf.convert_to_tensor(disturbed_tfn))
-            # '''
-            #####
-            # print(initial_inputs['tfn'].numpy()) # THIS VARIES BASED ON INPUTS['TFN'] :()
-
-
-
-            with tf.GradientTape() as tape:
-              tape.watch(inputs['tfn'])
-              original_tfn_np = inputs['tfn'].numpy()
-              original_tfn = inputs['tfn']
-
-              direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS) # Remove normalize field
-
-
-            grad_direction = 1. if maximize_stress else -1. #-1. if maximize_stress else 1.
-            input_grad = tape.gradient(traj_data[quantity_to_optimize], inputs['tfn']) # -1 in front means to maximize the quantity
-            # Optimize over input
-
-            curr_stress = traj_data[quantity_to_optimize]
-            if curr_stress < 8e-5:
-              print("Return early due to no contact from disturbance")
-              initial_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(initial_tfn))
-              return initial_stress, initial_inputs
-
-            if tf.math.is_nan(tf.norm(input_grad)):
-              print("Nan input grad")
-              print(input_grad)
-              initial_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(initial_tfn))
-              return initial_stress, initial_inputs
-
-
-            next_stress = curr_stress
-            test_inputs = inputs
-            updated_input_np = np.copy(inputs['tfn'].numpy())
-            # if next_stress < 6e-4:
-
-            def next_stress_acceptable(next_stress, curr_stress, input_grad, lr):
-              if not maximize_stress:
-                return next_stress <= curr_stress - lr/2  * tf.norm(input_grad)**2
-              else:
-                return next_stress >= curr_stress + lr/2  * tf.norm(input_grad)**2
-
-            # Backtracking line search
-            beta = 0.7
-            lr = 5e-6#5e-5
-
-            line_search_counter = 0
-            while tf.math.is_nan(next_stress) or (not tf.math.is_nan(next_stress) and not next_stress_acceptable(next_stress, curr_stress, input_grad, lr)):
-
-              if line_search_counter > 50 and tf.math.is_nan(next_stress):
-                print("Break")
-                break
-              # Reset to initial inputs
-              inputs['tfn'] = tf.Variable(tf.convert_to_tensor(original_tfn_np))
-
-              potential_next_tfn = inputs['tfn'] + lr * grad_direction * input_grad
-
-              # Keep the euler part the same
-              updated_input_np = potential_next_tfn.numpy()
-              updated_input_np[:, :, :3] = original_tfn_np[:, :, :3]
-              test_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np))
-
-              _, potential_traj_data, _ = params['evaluator'].evaluate(model, test_inputs, FLAGS) # Remove normalize field
-              next_stress = potential_traj_data[quantity_to_optimize]
-              lr = beta * lr
-
-              line_search_counter += 1
-
-
-            abs_delta_stress = np.abs(next_stress - initial_stress)
-
-            if next_stress < 8e-5:
-              print("Return early due to no contact")
-              initial_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(initial_tfn))
-              return initial_stress, initial_inputs
-
-            improved_from_initial = lambda a: a > initial_stress if maximize_stress else a < initial_stress
-            if improved_from_initial(next_stress): 
-              inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np)) # Update initial tfn
-              return initial_stress, inputs 
-
-
-            elif np.exp(-1.0 * abs_delta_stress / temp) > np.random.uniform():
-              print("Suboptimal accept")
-            #   inputs['tfn'] = tf.Variable(tf.convert_to_tensor(updated_input_np)) # Update initial tfn
-            #   return initial_stress, inputs 
-
-
-            # Restore initial inputs value
-            initial_inputs['tfn'] = tf.Variable(tf.convert_to_tensor(initial_tfn))
-
-
-            if tf.math.is_nan(next_stress):
-              print("Nan next stress")
-              return initial_stress, initial_inputs
-
-
-            if not improved_from_initial(curr_stress): # To force minimization
-              print("No improvement")
-              return initial_stress, initial_inputs
-
-            return initial_stress, inputs
-            return curr_stress, inputs
-
-            # print("Original mean pred stress", traj_data['mean_pred_stress'].numpy())
-
-          original_k = 0
-
-          import matplotlib
-          matplotlib.use('TkAgg')
-          from matplotlib import animation
-          import matplotlib.pyplot as plt 
-
-
-          # Optimize over inputs using optimizer
-          # '''
-          refined_stresses = []
-          world_pos_traj= []
-          tfn_traj = []
-          f_verts_traj = []
-
-          initial_state = {k: v[0] for k, v in inputs.items()}
-          initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
-          initial_f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
-
-          for k in range(num_iterations):
-            mean_pred_stress, inputs = refine_step(inputs, k)
-
-            print(k, mean_pred_stress.numpy())
-            print("\n")
-
-            refined_stresses.append(mean_pred_stress)
-
-            world_pos_traj.append(inputs['world_pos'].numpy())
-            tfn_traj.append(inputs['tfn'].numpy())
-
-            # Infer gripper pos at first contact
-            initial_state = {k: v[0] for k, v in inputs.items()}
-            initial_state['gripper_pos'] = deforming_plate_eval.gripper_pos_at_first_contact(initial_state, model.f_pc_original)
-            f_verts, _ = deforming_plate_model.f_verts_at_pos(initial_state, initial_state['gripper_pos'][0], model.f_pc_original)
-            f_verts_traj.append(f_verts.numpy())
-
-          # '''
-          fig2 = plt.figure()
-          plt.plot(refined_stresses)
-          plt.xlabel("Iteration step #")
-          plt.ylabel("Predicted mean stress")
-          # plt.show()
-
-          fig = plt.figure(figsize=(8, 8))
-          ax = fig.add_subplot(111, projection='3d')
-
-          # Don't animate
-          world_pos = world_pos_traj[-1]
-          f_verts_pos_initial = initial_f_verts.numpy()
-          f_verts_pos = f_verts_traj[-1]
-          X, Y, Z = world_pos.T
-          Xf, Yf, Zf = f_verts_pos.T
-          Xf0, Yf0, Zf0 = f_verts_pos_initial.T
-          ax.scatter(X[1180:], Y[1180:], Z[1180:], c=Y[1180:])
-          # ax.scatter(X, Y, Z)
-
-          ax.scatter(Xf0, Yf0, Zf0, c='gray')
-          optimized_c = "red" if maximize_stress else "green"
-          ax.scatter(Xf, Yf, Zf, c=optimized_c)
-          print(np.mean(f_verts_pos))
-
-          x_min, x_max = np.min(X), np.max(X)
-          y_min, y_max = np.min(Y), np.max(Y)
-          z_min, z_max = np.min(Z), np.max(Z)
-          max_range = np.array([x_max - x_min, y_max - y_min, z_max - z_min]).max() / 2.0
-          mid_x = (x_max + x_min) * 0.5
-          mid_y = (y_max + y_min) * 0.5
-          mid_z = (z_max + z_min) * 0.5
-          ax.set_xlim(mid_x - max_range, mid_x + max_range)
-          ax.set_ylim(mid_y - max_range, mid_y + max_range)
-          ax.set_zlim(mid_z - max_range, mid_z + max_range)
-
-          plt.show()
-
-          def animate(frame_num):
-            ax.cla()
-
-            world_pos = world_pos_traj[frame_num]
-            f_verts_pos = f_verts_traj[frame_num]
-            X, Y, Z = world_pos.T
-            Xf, Yf, Zf = f_verts_pos.T
-            ax.scatter(X, Y, Z)
-            ax.scatter(Xf, Yf, Zf)
-
-            x_min, x_max = np.min(X), np.max(X)
-            y_min, y_max = np.min(Y), np.max(Y)
-            z_min, z_max = np.min(Z), np.max(Z)
-            max_range = np.array([x_max - x_min, y_max - y_min, z_max - z_min]).max() / 2.0
-            mid_x = (x_max + x_min) * 0.5
-            mid_y = (y_max + y_min) * 0.5
-            mid_z = (z_max + z_min) * 0.5
-            ax.set_xlim(mid_x - max_range, mid_x + max_range)
-            ax.set_ylim(mid_y - max_range, mid_y + max_range)
-            ax.set_zlim(mid_z - max_range, mid_z + max_range)
-
-
-            return fig,
-
-
-
-          # Plot the refined grasp pose + object
-          # _ = animation.FuncAnimation(fig, animate, frames=50, repeat=False)
-          # plt.show(block=True)
-          continue
-
-
-        else:
-          direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS)
+        direct_output, traj_data, scalar_data = params['evaluator'].evaluate(model, inputs, FLAGS)
 
 
         # Record rollout trajectory
@@ -1281,15 +743,8 @@ def evaluator(model, params):
         pred_final_stresses['mean'].append(np.mean(traj_data['pred_stress'][-1]))
         pred_final_stresses['max'].append(np.max(traj_data['pred_stress'][-1]))
 
-        # print(pred_final_stresses['mean'][-1], actual_final_stresses['mean'][-1])
-        # '''
-
-
-
         mean_a, max_a, median_a = utils.get_global_deformation_metrics(traj_data['gt_pos'][0].numpy(), traj_data['gt_pos'][-1].numpy())
         mean_p, max_p, median_p = utils.get_global_deformation_metrics(traj_data['pred_pos'][0].numpy(), traj_data['pred_pos'][-1].numpy())
-
-
 
         actual_final_deformations['mean'].append(mean_a)
         actual_final_deformations['max'].append(max_a)
@@ -1300,11 +755,6 @@ def evaluator(model, params):
         pred_final_deformations['median'].append(median_p)
 
         print("Final error", scalar_data['stress_error'][-1], scalar_data['rollout_losses'][-1])
-        #print("Baseline final error", scalar_data['baseline_pos_final_error'])
-        #print("Sum of gt final pos", np.sum(traj_data['gt_pos'][-1]))
-        #print("Sum of pred final pos", np.sum(traj_data['pred_pos'][-1]))
-        # quit()
-
 
         # '''
 
@@ -1312,63 +762,10 @@ def evaluator(model, params):
       pass
 
 
-    for k in ['mean', 'max', 'median']:
-      all_object_actual_final_stresses[k].extend(actual_final_stresses[k])
-      all_object_pred_final_stresses[k].extend(pred_final_stresses[k])
-      all_object_actual_final_deformations[k].extend(actual_final_deformations[k])
-      all_object_pred_final_deformations[k].extend(pred_final_deformations[k])
-
-
-    indices = list(range(len(actual_final_stresses)))
-
-    # Classify by threshold per object
-    preds = [pred_final_stresses, pred_final_deformations]
-    actuals = [actual_final_stresses, actual_final_deformations]
-    runnings = [stresses_accuracy_running, deformations_accuracy_running]
-    metric_names = ["Stress", "Deformation"]
-    for ind, (metric_name, pred, actual) in enumerate(zip(metric_names, preds, actuals)):
-      print("======Metric:", metric_name)
-      for m_type in ['mean', 'max']:
-        # num_correct, num_total = utils.classification_accuracy_threshold(pred[m_type], actual[m_type], 50)
-        num_correct, num_total = utils.classification_accuracy_ranking(pred[m_type], actual[m_type], 30)
-
-        print(m_type, "accuracy:", num_correct / num_total, "of", num_total)
-        runnings[ind][m_type][0] += num_correct
-        runnings[ind][m_type][1] += num_total
-        print(m_type, "Running accuracy", runnings[ind][m_type][0]/runnings[ind][m_type][1], "of", runnings[ind][m_type][1])
-
-
-  all_preds = [all_object_pred_final_stresses, all_object_pred_final_deformations]
-  all_actuals = [all_object_actual_final_stresses, all_object_actual_final_deformations]
-  metric_names = ["Stress", "Deformation"]
-  print("\nAll object statistics")
-  for metric_name, all_pred, all_actual in zip(metric_names, all_preds, all_actuals):
-    print("======Metric:", metric_name)
-    for m_type in ['mean', 'max']:
-      # num_correct, num_total = utils.classification_accuracy_threshold(all_pred[m_type], all_actual[m_type], 50)
-      num_correct, num_total = utils.classification_accuracy_ranking(all_pred[m_type], all_actual[m_type], 50)
-      print(m_type, "Accuracy:", num_correct / num_total, "of", num_total)
-
-
-    # for key in scalars[0]:
-    #   logging.info('%s: %g', key, np.mean([x[key] for x in scalars]))
-
   with open(os.path.join(FLAGS.checkpoint_dir, 'rollout.pkl'), 'wb') as fp:
     pickle.dump(trajectories, fp)
 
-###################3
-class MyMLP(snt.Module):
-  def __init__(self, name=None):
-    super(MyMLP, self).__init__(name=name)
-    self.hidden1 = snt.Linear(1024, name="hidden1")
-    self.output = snt.Linear(10, name="output")
 
-  def __call__(self, x):
-    x = self.hidden1(x)
-    x = tf.nn.relu(x)
-    x = self.output(x)
-    return x
-  ##########################
 
 def main(argv):
   del argv
@@ -1381,9 +778,9 @@ def main(argv):
   global LEN_TRAJ
   utils.check_consistencies(FLAGS)
 
-  if utils.using_dm_dataset(FLAGS):
+  if utils.using_dm_dataset(FLAGS): # if default deepmind dataset
     LEN_TRAJ = 400 - 2
-  else:
+  else: # If defgraspnets dataset
     LEN_TRAJ = 50 - 2
     LEN_TRAJ = 30
 
@@ -1400,19 +797,15 @@ def main(argv):
     flags_file = os.path.join(FLAGS.checkpoint_dir, 'flags.txt')
     os.makedirs(FLAGS.checkpoint_dir, exist_ok=True)
     FLAGS.append_flags_into_file(flags_file)
-  
 
 
   output_size = utils.get_output_size(FLAGS)
 
 
-  # learned_model = core_model.SimplifiedNetwork() # for mlp
-
   #### Set up mixed precision
   # support_modes = snt.mixed_precision.modes([tf.float32, tf.float16])
   # core_model.EncodeProcessDecode.__call__ = support_modes(core_model.EncodeProcessDecode.__call__)
   # snt.mixed_precision.enable(tf.float16)
-
 
 
 
@@ -1434,15 +827,9 @@ def main(argv):
     learner(model, params)
   elif FLAGS.mode == 'eval':
     evaluator(model, params)
-  elif FLAGS.mode == "sample":
-    evaluator_sample(model, params)
-
 
 
 
 
 if __name__ == '__main__':
-
-
-
   app.run(main)
