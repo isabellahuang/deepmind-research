@@ -78,7 +78,7 @@ flags.DEFINE_integer('num_epochs', 50, 'Num epochs to train for')
 flags.DEFINE_integer('num_epochs_per_validation', 5,
                      'Num epochs to train per validation step')
 flags.DEFINE_float('learning_rate', 1e-4, 'Message passing steps')
-flags.DEFINE_float('noise_scale', 3e-3, 'Noise scale on world pos')
+flags.DEFINE_float('noise_scale', 3e-6, 'Noise scale on world pos')
 flags.DEFINE_bool(
     'noise_on_adjacent_step', True,
     'Add perturbation to both t and t + 1 step. If False, add only to t step.')
@@ -101,7 +101,7 @@ flags.DEFINE_bool(
     'use_total_force_as_feature', False,
     'Whether node feature should include the total gripper force. Else, the node feature includes the total gripper force divided by number of unique world edges between the gripper and the object.'
 )
-flags.DEFINE_bool('use_pd_stress', True,
+flags.DEFINE_bool('use_pd_stress', False,
                   'Use pd_stress rather than stress for inputs["stress"]')
 
 # Other
