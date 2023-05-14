@@ -95,8 +95,6 @@ def load_dataset(path, split):
 
 
 
-
-
 def add_targets(ds, FLAGS, fields, add_history):
   """Adds target and optionally history fields to dataframe."""
   def fn(trajectory):
@@ -133,9 +131,8 @@ def add_targets(ds, FLAGS, fields, add_history):
 
 
       # '''
-      # if FLAGS.gripper_force_action_input and key in ["gripper_pos"]: # This value should never be used bc written over later
 
-      if FLAGS.gripper_force_action_input and key in ["world_pos", "world_edges", "gripper_pos"]:
+      if key in ["world_pos", "world_edges", "gripper_pos"]:
 
         val_len = val.shape[0] 
         first_elem = tf.expand_dims(val[1], axis=0) # Should probably be index 1 instead of 0
@@ -147,9 +144,7 @@ def add_targets(ds, FLAGS, fields, add_history):
 
 
         # Tile all world_pos to be the same throughout trajectory
-        if not FLAGS.incremental:
-          if utils.predict_some_stress_only(FLAGS) or FLAGS.predict_pos_change_from_initial_only:
-            val = initial_quantity_repeated
+        val = initial_quantity_repeated
 
 
 
@@ -228,36 +223,3 @@ def batch_dataset(ds, batch_size):
   return ds_ba 
 
 
-  '''
-  ################################
-  # shapes = ds.output_shapes
-  # types = ds.output_types
-
-  def renumber(buffer, frame):
-    nodes, cells = buffer
-    new_nodes, new_cells = frame
-    return nodes + new_nodes, tf.concat([cells, new_cells+nodes], axis=0)
-
-  def batch_accumulate(ds_window):
-    out = {}
-    for key, ds_val in ds_window.items():
-
-
-      initial = tf.zeros((0, shapes[key][1]), dtype=types[key])
-
-      if key in ['cells', 'mesh_edges', 'world_edges']:
-
-        # renumber node indices in cells
-        num_nodes = ds_window['node_type'].map(lambda x: tf.shape(x)[0])
-        cells = tf.data.Dataset.zip((num_nodes, ds_val))
-        initial = (tf.constant(0, tf.int32), initial)
-        _, out[key] = cells.reduce(initial, renumber)
-      else:
-        merge = lambda prev, cur: tf.concat([prev, cur], axis=0)
-        out[key] = ds_val.reduce(initial, merge)
-    return out
-  if batch_size > 1:
-    ds = ds.window(batch_size, drop_remainder=True)
-    ds = ds.map(batch_accumulate, num_parallel_calls=tf.data.AUTOTUNE)
-  return ds
-  '''

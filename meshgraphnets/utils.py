@@ -13,38 +13,8 @@ sys.path.append('/home/isabella/deformable_object_grasping/isabella')
 import data_creator_utils as dcu
 
 def get_output_size(FLAGS):
-    if predict_some_stress_only(FLAGS):
-        return 1 
-    elif predict_some_def_only(FLAGS):
-        return 3
-    else:
-        return 4 # velocity and stress
+    return 4 # Velocity + stress
 
-def check_consistencies(FLAGS):
-    if FLAGS.predict_stress_change_only:
-        assert(FLAGS.gripper_force_action_input)
-
-def predict_stress_and_def(FLAGS):
-    if FLAGS.predict_stress_t_only and FLAGS.predict_pos_change_from_initial_only:
-        return True 
-    return False
-
-def predict_some_stress_only(FLAGS):
-    if (FLAGS.predict_log_stress_t_only or FLAGS.predict_log_stress_t1_only or FLAGS.predict_log_stress_change_only or FLAGS.predict_stress_change_only or FLAGS.predict_stress_t_only) and not predict_stress_and_def(FLAGS):
-        assert(not FLAGS.predict_pos_change_only)
-        return True
-    return False
-
-def predict_some_def_only(FLAGS):
-    if FLAGS.predict_pos_change_from_initial_only and not predict_stress_and_def(FLAGS):
-        return True 
-    return False
-
-
-def stress_t_as_node_feature(FLAGS):
-    if FLAGS.predict_log_stress_t_only or FLAGS.predict_pos_change_only or FLAGS.predict_stress_t_only or FLAGS.predict_pos_change_from_initial_only:
-        return False
-    return True
 
 def using_dm_dataset(FLAGS):
     return 'deforming_plate_data' in FLAGS.dataset_dir

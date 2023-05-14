@@ -3,6 +3,7 @@ import os
 import csv
 import argparse
 import math
+import numpy as np
 
 # Create command line flag options
 parser = argparse.ArgumentParser(description='Options')
@@ -13,9 +14,8 @@ args = parser.parse_args()
 
 
 # initialize figures
-''
+
 fig, (ax1, ax2) = plt.subplots(2)
-# fig, ax2 = plt.subplots(1)
 plt.figure(3)
 
 
@@ -35,6 +35,7 @@ for f_ind, folder in enumerate(folders):
 	baseline_pos_mean_error, baseline_pos_final_error = None, None
 	baseline_stress_mean_error, baseline_stress_final_error = None, None
 	tau_stress, tau_def = [], []
+	tau_max_stress = []
 	def_percent_errors, stress_percent_errors = [], []
 
 	with open(loss_file, newline='') as csvfile:
@@ -53,11 +54,6 @@ for f_ind, folder in enumerate(folders):
 				test_stress_final_errors.append(float(row[8]))
 				baseline_stress_mean_error = float(row[9])
 				baseline_stress_final_error = float(row[10])
-				tau_stress.append(float(row[11]))
-				tau_def.append(float(row[12]))
-				def_percent_errors.append(float(row[13]))
-				stress_percent_errors.append(float(row[14]))
-
 
 
 	ax1.plot(test_losses[args.start:args.end], label="Test loss " + folder)
@@ -76,10 +72,9 @@ for f_ind, folder in enumerate(folders):
 	if baseline_pos_mean_error and baseline_pos_final_error:
 		plt.plot([baseline_pos_mean_error] * len_plots, color='gray')
 		plt.plot([baseline_pos_final_error] * len_plots, '--', color='gray')
-	plt.title("Pos test losses")
+	plt.title("Pos test losses in real units")
 	plt.legend()
 
-	# '''
 	plt.figure(4)
 	plt.plot(test_stress_mean_errors[args.start:args.end], alpha=0.7, label="Test mean loss " + folder, color=colors[f_ind])
 	plt.plot(test_stress_final_errors[args.start:args.end], '--', alpha=0.7, label="Test final loss " + folder, color=colors[f_ind])
@@ -87,20 +82,8 @@ for f_ind, folder in enumerate(folders):
 	if baseline_stress_mean_error and baseline_stress_final_error:
 		plt.plot([baseline_stress_mean_error] * len_plots, color='gray')
 		plt.plot([baseline_stress_final_error] * len_plots, '--', color='gray')
-	plt.title("Stress test losses")
+	plt.title("Stress test losses in real units")
 	plt.legend()
-	# '''
 
-	plt.figure(5)
-	plt.plot(tau_stress[args.start:args.end], label="mean stress " + folder, color=colors[f_ind])
-	plt.plot(tau_def[args.start:args.end], '--', label="mean def " + folder, color=colors[f_ind])
-	plt.title("Kendall tau")
-	plt.legend() 
-
-	plt.figure(6)
-	plt.plot(stress_percent_errors[args.start:args.end], label="stress percent error " + folder, color=colors[f_ind])
-	plt.plot(def_percent_errors[args.start:args.end], '--', label="def percent error " + folder, color=colors[f_ind])
-	plt.title("Prediction percent errors")
-	plt.legend()
 
 plt.show()
