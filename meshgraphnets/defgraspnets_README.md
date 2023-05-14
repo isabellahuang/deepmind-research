@@ -5,7 +5,7 @@ This codebase can be used to train the DefGraspNets model in our paper [DefGrasp
 The following document describes how to train the mode, plot losses, do full predictive rollouts on test sets, and visualize those rollouts. 
 
 ## Setup
-Make sure you are on the ```migrate_tf2``` branch of this work. Then, run 
+Make sure you are on the ```migrate_tf2``` branch of this fork. Then, run 
 ```pip install -r meshgraphnets/requirements.txt```
 
 This was tested on Ubuntu 18.04 with Cuda 11.2. Please see this table for TensorFlow compatibility for your machine: https://www.tensorflow.org/install/source#gpu
@@ -16,7 +16,7 @@ This dataset contains 90 unique object. For each object, 100 random grasps are s
 For each grasp, there are 50 grasp states for grasp forces between 0 and 15 N. 
 Each grasp state includes the full state information of the interaction (e.g., all mesh nodal positions and element stresses).
 This dataset, titled ```dgs_dataset```, can be downloaded here: https://drive.google.com/file/d/1UKrPv5eetRbXEwVMjTgtarj4T8bV4_fq/view?usp=sharing
-Note that this dataset currently only contains experiments for objects with elastic modulus 5e5
+Note that this dataset currently only contains experiments for objects with elastic modulus 5e5. More data to be uploaded. 
 
 
 ## Training
